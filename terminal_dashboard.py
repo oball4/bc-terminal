@@ -35,42 +35,105 @@ SECTOR_ETFS = {
 }
 
 INDUSTRY_ETFS = {
-    # Technology
-    "Semiconductors":         "SOXX",
-    "Software":               "IGV",
-    "Cybersecurity":          "CIBR",
-    "Internet":               "FDN",
-    # Financials
-    "Banks":                  "KBE",
-    "Regional Banks":         "KRE",
-    "Insurance":              "KIE",
-    # Health Care
-    "Biotech":                "XBI",
-    "Medical Devices":        "IHI",
-    "Pharma":                 "IHE",
-    # Energy
-    "Oil & Gas E&P":          "XOP",
-    "Oil Services":           "OIH",
-    "Clean Energy":           "ICLN",
-    # Consumer
-    "Homebuilders":           "XHB",
-    "Retail":                 "XRT",
-    # Industrials
-    "Aerospace & Defense":    "ITA",
-    "Transportation":         "IYT",
-    # Materials
-    "Gold Miners":            "GDX",
-    "Metals & Mining":        "XME",
-    # Commodities
-    "Gold":                   "GLD",
-    "Crude Oil":              "USO",
-    # Fixed Income
-    "20Y Treasuries":         "TLT",
-    "High Yield Bonds":       "HYG",
-    # International
-    "Emerging Markets":       "EEM",
-    "China":                  "MCHI",
-    "Europe":                 "VGK",
+    # ----- Technology -----
+    "Semiconductors":           "SOXX",
+    "Semis (Equal Weight)":     "XSD",
+    "Software":                 "IGV",
+    "Cybersecurity":            "CIBR",
+    "Internet":                 "FDN",
+    "Cloud Computing":          "SKYY",
+    "AI & Big Data":            "BOTZ",
+    "Robotics & Automation":    "ROBO",
+    "Fintech":                  "FINX",
+    # ----- Financials -----
+    "Big Banks":                "KBWB",
+    "Banks (Broad)":            "KBE",
+    "Regional Banks":           "KRE",
+    "Investment Banks & Brokers": "KCE",
+    "Insurance":                "KIE",
+    "Asset Managers":           "AMOR",
+    "Mortgage REITs":           "REM",
+    # ----- Health Care -----
+    "Biotech (Equal Weight)":   "XBI",
+    "Biotech (Cap Weight)":     "IBB",
+    "Medical Devices":          "IHI",
+    "Pharma":                   "IHE",
+    "Health Care Equipment":    "XHE",
+    "Health Care Providers":    "IHF",
+    # ----- Energy -----
+    "Oil & Gas E&P":            "XOP",
+    "Oil Services":             "OIH",
+    "Natural Gas":              "FCG",
+    "Clean Energy":             "ICLN",
+    "Solar":                    "TAN",
+    "Hydrogen":                 "HDRO",
+    "Uranium":                  "URA",
+    # ----- Consumer Discretionary -----
+    "Homebuilders":             "XHB",
+    "Retail":                   "XRT",
+    "Online Retail":            "IBUY",
+    "Restaurants":              "EATZ",
+    "Travel & Leisure":         "AWAY",
+    "Sports Betting":           "BETZ",
+    "Airlines":                 "JETS",
+    "Cannabis":                 "MSOS",
+    # ----- Consumer Staples -----
+    "Agribusiness":             "MOO",
+    # ----- Industrials -----
+    "Aerospace & Defense":      "ITA",
+    "Defense (Pure-Play)":      "PPA",
+    "Transportation":           "IYT",
+    "Shipping":                 "SEA",
+    "Infrastructure":           "PAVE",
+    # ----- Real Estate -----
+    "Real Estate (Broad)":      "VNQ",
+    "Residential REITs":        "REZ",
+    # ----- Materials -----
+    "Gold Miners":              "GDX",
+    "Junior Gold Miners":       "GDXJ",
+    "Silver Miners":            "SIL",
+    "Copper Miners":            "COPX",
+    "Lithium & Battery":        "LIT",
+    "Steel":                    "SLX",
+    "Metals & Mining":          "XME",
+    # ----- Utilities & Water -----
+    "Water":                    "PHO",
+    # ----- Commodities -----
+    "Gold":                     "GLD",
+    "Silver":                   "SLV",
+    "Copper":                   "CPER",
+    "Crude Oil":                "USO",
+    "Natural Gas Futures":      "UNG",
+    "Broad Commodities":        "DBC",
+    # ----- Fixed Income -----
+    "Short Treasuries (1-3Y)":  "SHY",
+    "Intermediate Tres (7-10Y)":"IEF",
+    "20Y+ Treasuries":          "TLT",
+    "TIPS":                     "TIP",
+    "Investment Grade Corp":    "LQD",
+    "High Yield Bonds":         "HYG",
+    "Convertible Bonds":        "CWB",
+    "Municipal Bonds":          "MUB",
+    "EM Bonds (USD)":           "EMB",
+    # ----- International -----
+    "Emerging Markets":         "EEM",
+    "China":                    "MCHI",
+    "India":                    "INDA",
+    "Japan":                    "EWJ",
+    "Korea":                    "EWY",
+    "Taiwan":                   "EWT",
+    "Brazil":                   "EWZ",
+    "Mexico":                   "EWW",
+    "Europe":                   "VGK",
+    "United Kingdom":           "EWU",
+    "Germany":                  "EWG",
+    # ----- Style & Factor -----
+    "ARK Innovation":           "ARKK",
+    "Quality":                  "QUAL",
+    "Momentum":                 "MTUM",
+    "Low Volatility":           "USMV",
+    "Large Cap Growth":         "IWF",
+    "Small Cap Value":          "IWN",
 }
 
 # =========================
@@ -382,6 +445,7 @@ def get_info(ticker):
         return yf.Ticker(ticker, session=get_session()).info or {}
     except Exception:
         return {}
+
 
 
 def color_signed(val):
@@ -861,14 +925,6 @@ st.markdown(
 # =========================
 # SIDEBAR — Watchlist
 # =========================
-# Subsectors dict is used by the Financials tab
-subsectors = {
-    "Banks":          ["JPM", "BAC", "WFC", "C", "GS", "MS"],
-    "Asset Managers": ["BLK", "TROW", "KKR", "APO", "BX"],
-    "Insurance":      ["AIG", "ALL", "MET", "PRU", "TRV"],
-    "Payments":       ["V", "MA", "PYPL", "AXP", "COF"],
-}
-
 # Initialize watchlist — reads from URL query params if present (so bookmarking
 # the URL preserves the watchlist across sessions / devices), otherwise uses
 # sensible defaults.
@@ -963,8 +1019,8 @@ for t in list(st.session_state.watchlist):
 # =========================
 # TABS
 # =========================
-tab_markets, tab_industries, tab_calendar, tab_financials = st.tabs(
-    ["Markets", "Industries", "Calendar", "Financials"]
+tab_markets, tab_comparison, tab_industries, tab_calendar = st.tabs(
+    ["Markets", "Comparison", "Industries", "Calendar"]
 )
 
 # =========================================================================
@@ -1205,116 +1261,6 @@ with tab_markets:
         with st.expander(f"About {info.get('longName', chart_ticker)}"):
             st.write(desc)
 
-    # ---- Stock Comparison Chart ----
-    st.markdown(
-        '<div class="kicker">Normalized to 100 at Start</div>'
-        '<div class="panel-title">Stock Comparison</div>',
-        unsafe_allow_html=True,
-    )
-
-    # Initialize comparison list in session state
-    if "compare_tickers" not in st.session_state:
-        st.session_state.compare_tickers = ["AAPL", "MSFT", "NVDA", "GOOGL"]
-
-    # Add-ticker form
-    with st.form("compare_add_form", clear_on_submit=True):
-        cmp_left, cmp_right = st.columns([5, 1])
-        with cmp_left:
-            new_cmp = st.text_input(
-                "Add ticker to compare",
-                placeholder="Add tickers to compare (e.g. AMD, TSLA, ^GSPC)",
-                label_visibility="collapsed",
-            )
-        with cmp_right:
-            cmp_submit = st.form_submit_button("Add", use_container_width=True)
-        if cmp_submit and new_cmp:
-            new_clean = new_cmp.strip().upper()
-            if new_clean and new_clean not in st.session_state.compare_tickers:
-                st.session_state.compare_tickers.append(new_clean)
-                st.rerun()
-
-    # Render selected tickers as removable pills
-    if st.session_state.compare_tickers:
-        pill_cols = st.columns(min(len(st.session_state.compare_tickers), 8))
-        for i, t in enumerate(list(st.session_state.compare_tickers)):
-            with pill_cols[i % len(pill_cols)]:
-                if st.button(f"{t} ×", key=f"cmp_rm_{t}",
-                             help=f"Remove {t}", use_container_width=True):
-                    st.session_state.compare_tickers.remove(t)
-                    st.rerun()
-
-    # Period selector
-    cmp_period = st.segmented_control(
-        "Comparison Period",
-        options=PERIOD_OPTIONS,
-        default="6M",
-        label_visibility="collapsed",
-        key="cmp_period_v2",
-    )
-    if not cmp_period:
-        cmp_period = "6M"
-
-    if not st.session_state.compare_tickers:
-        st.info("Add at least one ticker above to see a comparison.")
-    else:
-        cmp_palette = ["#2563eb", "#059669", "#dc2626", "#d97706",
-                       "#7c3aed", "#db2777", "#0891b2", "#ca8a04",
-                       "#4338ca", "#047857", "#b91c1c", "#a16207"]
-        cmp_fig = go.Figure()
-        any_data = False
-
-        for i, t in enumerate(st.session_state.compare_tickers):
-            cmp_hist = get_chart_history(t, cmp_period)
-            if cmp_hist.empty or len(cmp_hist) < 2:
-                continue
-            any_data = True
-            closes = cmp_hist["Close"]
-            start_px = float(closes.iloc[0])
-            end_px = float(closes.iloc[-1])
-            ret_pct = (end_px - start_px) / start_px * 100
-            normalized = closes / start_px * 100
-
-            sign = "+" if ret_pct >= 0 else ""
-            legend_name = f"{t}  {sign}{ret_pct:.2f}%"
-
-            cmp_fig.add_trace(go.Scatter(
-                x=normalized.index,
-                y=normalized.values,
-                mode="lines",
-                name=legend_name,
-                line=dict(color=cmp_palette[i % len(cmp_palette)], width=2),
-                hovertemplate=f"<b>{t}</b><br>%{{x|%b %d, %Y}}<br>%{{y:.2f}}<extra></extra>",
-            ))
-
-        if not any_data:
-            st.warning("No data available for the selected tickers.")
-        else:
-            cmp_fig.add_hline(
-                y=100, line_dash="dash", line_color="#9ca3af", line_width=1,
-                annotation_text="Start", annotation_position="right",
-                annotation_font=dict(family="Inter, sans-serif", size=10, color="#9ca3af"),
-            )
-            cmp_fig.update_layout(
-                template="simple_white",
-                paper_bgcolor="#ffffff",
-                plot_bgcolor="#ffffff",
-                height=420,
-                margin=dict(l=10, r=10, t=10, b=10),
-                showlegend=True,
-                legend=dict(
-                    orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
-                    font=dict(family="JetBrains Mono, monospace", size=12, color="#111827"),
-                ),
-                font=dict(family="Inter, sans-serif", color="#111827", size=11),
-                hovermode="x unified",
-            )
-            cmp_fig.update_xaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
-                                 linecolor="#e5e7eb", showline=True)
-            cmp_fig.update_yaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
-                                 linecolor="#e5e7eb", showline=True,
-                                 tickformat=".1f")
-            st.plotly_chart(cmp_fig, width="stretch")
-
     # ---- Macro News ----
     st.markdown('<div class="panel-title">Macro Headlines</div>', unsafe_allow_html=True)
     news = fetch_macro_news(limit=10)
@@ -1336,126 +1282,12 @@ with tab_markets:
             """)
         st.markdown("".join(news_html), unsafe_allow_html=True)
 
-# =========================================================================
-# FINANCIALS TAB
-# =========================================================================
-def _build_subsector_table(ticker_list):
-    """Build a quote DataFrame for a list of tickers."""
-    rows = []
-    for t in ticker_list:
-        hist = get_history(t, period="5d")
-        if hist.empty:
-            continue
-        price = hist["Close"].iloc[-1]
-        prev = hist["Close"].iloc[-2] if len(hist) >= 2 else hist["Open"].iloc[-1]
-        pct = (price - prev) / prev * 100
-        info = get_info(t)
-        rows.append({
-            "Ticker":  t,
-            "Last":    f"{price:,.2f}",
-            "Chg%":    f"{pct:+.2f}%",
-            "Mkt Cap": fmt_big(info.get("marketCap")),
-            "P/E":     fmt_num(info.get("trailingPE")),
-        })
-    return pd.DataFrame(rows)
-
-
-def _render_subsector(name, ticker_list):
-    """Render one subsector block: header, quote table."""
-    st.markdown(
-        f'<div class="kicker">{len(ticker_list)} names</div>'
-        f'<div class="panel-title">{name}</div>',
-        unsafe_allow_html=True,
-    )
-    df = _build_subsector_table(ticker_list)
-    if df.empty:
-        st.warning(f"Could not load {name} data.")
-        return
-    styled = (
-        df.style
-        .set_properties(**{
-            "background-color": "#ffffff",
-            "color": "#111827",
-            "font-family": "JetBrains Mono, monospace",
-            "font-size": "13px",
-        })
-        .map(color_signed, subset=["Chg%"])
-    )
-    st.dataframe(styled, width="stretch", hide_index=True)
-
-
-with tab_financials:
-    st.markdown(
-        '<div class="kicker">Large-Cap U.S. Financials</div>'
-        '<div class="panel-title">Sector Overview</div>',
-        unsafe_allow_html=True,
-    )
-
-    # 2x2 grid of subsectors
-    row1_left, row1_right = st.columns(2)
-    with row1_left:
-        _render_subsector("Banks", subsectors["Banks"])
-    with row1_right:
-        _render_subsector("Insurance", subsectors["Insurance"])
-
-    row2_left, row2_right = st.columns(2)
-    with row2_left:
-        _render_subsector("Asset Managers", subsectors["Asset Managers"])
-    with row2_right:
-        _render_subsector("Payments", subsectors["Payments"])
-
 
 # =========================================================================
 # INDUSTRIES TAB
 # =========================================================================
 with tab_industries:
-    # ---- Sectors ----
-    st.markdown(
-        '<div class="kicker">S&P 500 via SPDR Select Sector ETFs</div>'
-        '<div class="panel-title">Sector Performance</div>',
-        unsafe_allow_html=True,
-    )
-
-    sort_col_sec = st.selectbox(
-        "Sort by",
-        ["1D", "1W", "1M", "3M", "YTD", "1Y"],
-        index=0,
-        key="sector_sort",
-    )
-
-    sector_perf = build_performance_table(SECTOR_ETFS)
-    if not sector_perf.empty:
-        sector_sorted = sector_perf.sort_values(
-            sort_col_sec, ascending=False, na_position="last"
-        )
-        st.dataframe(format_and_style_perf(sector_sorted), width="stretch", hide_index=True)
-    else:
-        st.warning("Could not load sector data. Try refreshing in a minute.")
-
-    # ---- Industries ----
-    st.markdown(
-        '<div class="kicker">Sub-Industry and Macro Proxies</div>'
-        '<div class="panel-title">Industry Groups</div>',
-        unsafe_allow_html=True,
-    )
-
-    sort_col_ind = st.selectbox(
-        "Sort by",
-        ["1D", "1W", "1M", "3M", "YTD", "1Y"],
-        index=0,
-        key="industry_sort",
-    )
-
-    industry_perf = build_performance_table(INDUSTRY_ETFS)
-    if not industry_perf.empty:
-        industry_sorted = industry_perf.sort_values(
-            sort_col_ind, ascending=False, na_position="last"
-        )
-        st.dataframe(format_and_style_perf(industry_sorted), width="stretch", hide_index=True)
-    else:
-        st.warning("Could not load industry data. Try refreshing in a minute.")
-
-    # ---- Relative Performance Chart ----
+    # ---- Relative Performance Chart (top) ----
     st.markdown(
         '<div class="kicker">Normalized to 100 at Start</div>'
         '<div class="panel-title">Relative Performance</div>',
@@ -1525,7 +1357,7 @@ with tab_industries:
             template="simple_white",
             paper_bgcolor="#ffffff",
             plot_bgcolor="#ffffff",
-            height=420,
+            height=480,
             margin=dict(l=10, r=10, t=10, b=10),
             showlegend=True,
             legend=dict(
@@ -1542,6 +1374,52 @@ with tab_industries:
                              tickformat=".1f")
 
         st.plotly_chart(rel_fig, width="stretch")
+
+    # ---- Sectors (middle) ----
+    st.markdown(
+        '<div class="kicker">S&P 500 via SPDR Select Sector ETFs</div>'
+        '<div class="panel-title">Sector Performance</div>',
+        unsafe_allow_html=True,
+    )
+
+    sort_col_sec = st.selectbox(
+        "Sort by",
+        ["1D", "1W", "1M", "3M", "YTD", "1Y"],
+        index=0,
+        key="sector_sort",
+    )
+
+    sector_perf = build_performance_table(SECTOR_ETFS)
+    if not sector_perf.empty:
+        sector_sorted = sector_perf.sort_values(
+            sort_col_sec, ascending=False, na_position="last"
+        )
+        st.dataframe(format_and_style_perf(sector_sorted), width="stretch", hide_index=True)
+    else:
+        st.warning("Could not load sector data. Try refreshing in a minute.")
+
+    # ---- Industries (bottom) ----
+    st.markdown(
+        '<div class="kicker">Sub-Industry and Macro Proxies</div>'
+        '<div class="panel-title">Industry Groups</div>',
+        unsafe_allow_html=True,
+    )
+
+    sort_col_ind = st.selectbox(
+        "Sort by",
+        ["1D", "1W", "1M", "3M", "YTD", "1Y"],
+        index=0,
+        key="industry_sort",
+    )
+
+    industry_perf = build_performance_table(INDUSTRY_ETFS)
+    if not industry_perf.empty:
+        industry_sorted = industry_perf.sort_values(
+            sort_col_ind, ascending=False, na_position="last"
+        )
+        st.dataframe(format_and_style_perf(industry_sorted), width="stretch", hide_index=True)
+    else:
+        st.warning("Could not load industry data. Try refreshing in a minute.")
 
 
 # =========================================================================
@@ -1628,3 +1506,116 @@ with tab_calendar:
         '</div>',
         unsafe_allow_html=True,
     )
+
+
+# =========================================================================
+# COMPARISON TAB
+# =========================================================================
+with tab_comparison:
+    st.markdown(
+        '<div class="kicker">Normalized to 100 at Start</div>'
+        '<div class="panel-title">Stock Comparison</div>',
+        unsafe_allow_html=True,
+    )
+
+    if "compare_tickers" not in st.session_state:
+        st.session_state.compare_tickers = ["AAPL", "MSFT", "NVDA", "GOOGL"]
+
+    # Add-ticker form
+    with st.form("compare_add_form", clear_on_submit=True):
+        cmp_left, cmp_right = st.columns([5, 1])
+        with cmp_left:
+            new_cmp = st.text_input(
+                "Add ticker to compare",
+                placeholder="Add tickers to compare (e.g. AMD, TSLA, ^GSPC)",
+                label_visibility="collapsed",
+            )
+        with cmp_right:
+            cmp_submit = st.form_submit_button("Add", use_container_width=True)
+        if cmp_submit and new_cmp:
+            new_clean = new_cmp.strip().upper()
+            if new_clean and new_clean not in st.session_state.compare_tickers:
+                st.session_state.compare_tickers.append(new_clean)
+                st.rerun()
+
+    # Removable pills
+    if st.session_state.compare_tickers:
+        pill_cols = st.columns(min(len(st.session_state.compare_tickers), 8))
+        for i, t in enumerate(list(st.session_state.compare_tickers)):
+            with pill_cols[i % len(pill_cols)]:
+                if st.button(f"{t} ×", key=f"cmp_rm_{t}",
+                             help=f"Remove {t}", use_container_width=True):
+                    st.session_state.compare_tickers.remove(t)
+                    st.rerun()
+
+    cmp_period = st.segmented_control(
+        "Comparison Period",
+        options=PERIOD_OPTIONS,
+        default="6M",
+        label_visibility="collapsed",
+        key="cmp_period_v2",
+    )
+    if not cmp_period:
+        cmp_period = "6M"
+
+    if not st.session_state.compare_tickers:
+        st.info("Add at least one ticker above to see a comparison.")
+    else:
+        cmp_palette = ["#2563eb", "#059669", "#dc2626", "#d97706",
+                       "#7c3aed", "#db2777", "#0891b2", "#ca8a04",
+                       "#4338ca", "#047857", "#b91c1c", "#a16207"]
+        cmp_fig = go.Figure()
+        any_data = False
+
+        for i, t in enumerate(st.session_state.compare_tickers):
+            cmp_hist = get_chart_history(t, cmp_period)
+            if cmp_hist.empty or len(cmp_hist) < 2:
+                continue
+            any_data = True
+            closes = cmp_hist["Close"]
+            start_px = float(closes.iloc[0])
+            end_px = float(closes.iloc[-1])
+            ret_pct = (end_px - start_px) / start_px * 100
+            normalized = closes / start_px * 100
+
+            sign = "+" if ret_pct >= 0 else ""
+            legend_name = f"{t}  {sign}{ret_pct:.2f}%"
+
+            cmp_fig.add_trace(go.Scatter(
+                x=normalized.index,
+                y=normalized.values,
+                mode="lines",
+                name=legend_name,
+                line=dict(color=cmp_palette[i % len(cmp_palette)], width=2),
+                hovertemplate=f"<b>{t}</b><br>%{{x|%b %d, %Y}}<br>%{{y:.2f}}<extra></extra>",
+            ))
+
+        if not any_data:
+            st.warning("No data available for the selected tickers.")
+        else:
+            cmp_fig.add_hline(
+                y=100, line_dash="dash", line_color="#9ca3af", line_width=1,
+                annotation_text="Start", annotation_position="right",
+                annotation_font=dict(family="Inter, sans-serif", size=10, color="#9ca3af"),
+            )
+            cmp_fig.update_layout(
+                template="simple_white",
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#ffffff",
+                height=520,
+                margin=dict(l=10, r=10, t=10, b=10),
+                showlegend=True,
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
+                    font=dict(family="JetBrains Mono, monospace", size=12, color="#111827"),
+                ),
+                font=dict(family="Inter, sans-serif", color="#111827", size=11),
+                hovermode="x unified",
+            )
+            cmp_fig.update_xaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
+                                 linecolor="#e5e7eb", showline=True)
+            cmp_fig.update_yaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
+                                 linecolor="#e5e7eb", showline=True,
+                                 tickformat=".1f")
+            st.plotly_chart(cmp_fig, width="stretch")
+
