@@ -9,7 +9,7 @@ from datetime import datetime
 # PAGE CONFIG
 # =========================
 st.set_page_config(
-    page_title="BC Terminal",
+    page_title="Knight Terminal",
     page_icon="■",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -48,6 +48,64 @@ def aggregate_trades(trades):
 
 
 FUND_HOLDINGS = aggregate_trades(FUND_TRADES)
+
+# =========================
+# SECTOR & INDUSTRY ETFs
+# =========================
+# Standard proxies for broad-market performance tracking. SPDR Select Sector
+# ETFs for S&P 500 sectors, plus popular sub-industry ETFs.
+SECTOR_ETFS = {
+    "Technology":             "XLK",
+    "Financials":             "XLF",
+    "Health Care":            "XLV",
+    "Energy":                 "XLE",
+    "Consumer Discretionary": "XLY",
+    "Consumer Staples":       "XLP",
+    "Industrials":            "XLI",
+    "Materials":              "XLB",
+    "Utilities":              "XLU",
+    "Real Estate":            "XLRE",
+    "Communication Services": "XLC",
+}
+
+INDUSTRY_ETFS = {
+    # Technology
+    "Semiconductors":         "SOXX",
+    "Software":               "IGV",
+    "Cybersecurity":          "CIBR",
+    "Internet":               "FDN",
+    # Financials
+    "Banks":                  "KBE",
+    "Regional Banks":         "KRE",
+    "Insurance":              "KIE",
+    # Health Care
+    "Biotech":                "XBI",
+    "Medical Devices":        "IHI",
+    "Pharma":                 "IHE",
+    # Energy
+    "Oil & Gas E&P":          "XOP",
+    "Oil Services":           "OIH",
+    "Clean Energy":           "ICLN",
+    # Consumer
+    "Homebuilders":           "XHB",
+    "Retail":                 "XRT",
+    # Industrials
+    "Aerospace & Defense":    "ITA",
+    "Transportation":         "IYT",
+    # Materials
+    "Gold Miners":            "GDX",
+    "Metals & Mining":        "XME",
+    # Commodities
+    "Gold":                   "GLD",
+    "Crude Oil":              "USO",
+    # Fixed Income
+    "20Y Treasuries":         "TLT",
+    "High Yield Bonds":       "HYG",
+    # International
+    "Emerging Markets":       "EEM",
+    "China":                  "MCHI",
+    "Europe":                 "VGK",
+}
 
 # =========================
 # STYLE — LIGHT MODE / NAVY ACCENT
@@ -285,7 +343,7 @@ if _password and not st.session_state.get("authenticated"):
     _, center, _ = st.columns([1, 2, 1])
     with center:
         st.markdown("<br><br><br>", unsafe_allow_html=True)
-        st.markdown("### BC Terminal")
+        st.markdown("### Knight Terminal")
         st.markdown("Enter password to continue.")
         pwd = st.text_input("Password", type="password", label_visibility="collapsed")
         if pwd:
@@ -542,6 +600,192 @@ def compute_portfolio_history(trades):
     return pd.DataFrame(records)
 
 
+def compute_returns_from_series(close_series):
+    """Compute 1D/1W/1M/3M/YTD/1Y returns from a Close price Series.
+
+    Uses trading-day offsets: ~5/22/63 for week/month/3-month. YTD uses
+    the first trading day of the current year.
+    """
+    out = {"Last": None, "1D": None, "1W": None, "1M": None,
+           "3M": None, "YTD": None, "1Y": None}
+    if close_series is None or close_series.empty or len(close_series) < 2:
+        return out
+    last = float(close_series.iloc[-1])
+    out["Last"] = last
+
+    def _ret(offset):
+        if len(close_series) > offset:
+            ref = float(close_series.iloc[-1 - offset])
+            if ref > 0:
+                return (last - ref) / ref * 100
+        return None
+
+    out["1D"] = _ret(1)
+    out["1W"] = _ret(5)
+    out["1M"] = _ret(21)
+    out["3M"] = _ret(63)
+
+    # YTD — from first trading day of current year
+    current_year = close_series.index[-1].year
+    ytd_slice = close_series[close_series.index.year == current_year]
+    if len(ytd_slice) >= 2:
+        ref = float(ytd_slice.iloc[0])
+        if ref > 0:
+            out["YTD"] = (last - ref) / ref * 100
+
+    # 1Y — use earliest point in the series (assumes period="1y")
+    ref = float(close_series.iloc[0])
+    if ref > 0:
+        out["1Y"] = (last - ref) / ref * 100
+
+    return out
+
+
+def build_performance_table(ticker_map):
+    """Build a performance DataFrame for a dict of {display_name: ticker}."""
+    rows = []
+    for name, ticker in ticker_map.items():
+        hist = get_history(ticker, period="1y")
+        if hist.empty:
+            rows.append({"Name": name, "Ticker": ticker, "Last": None,
+                         "1D": None, "1W": None, "1M": None, "3M": None,
+                         "YTD": None, "1Y": None})
+            continue
+        r = compute_returns_from_series(hist["Close"])
+        rows.append({"Name": name, "Ticker": ticker, **r})
+    return pd.DataFrame(rows)
+
+
+def format_and_style_perf(df):
+    """Format the performance DataFrame for display and apply green/red coloring."""
+    d = df.copy()
+    d["Last"] = d["Last"].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "—")
+    for col in ["1D", "1W", "1M", "3M", "YTD", "1Y"]:
+        d[col] = d[col].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "—")
+    d = d.rename(columns={
+        "1D": "1D %", "1W": "1W %", "1M": "1M %",
+        "3M": "3M %", "YTD": "YTD %", "1Y": "1Y %",
+    })
+    pct_cols = ["1D %", "1W %", "1M %", "3M %", "YTD %", "1Y %"]
+    return (
+        d.style
+        .set_properties(**{
+            "background-color": "#ffffff",
+            "color": "#111827",
+            "font-family": "JetBrains Mono, monospace",
+            "font-size": "13px",
+        })
+        .map(color_signed, subset=pct_cols)
+    )
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def generate_market_summary():
+    """Compose a one-paragraph market summary from live data.
+
+    NOT an LLM-generated summary — just templated prose derived from price moves
+    across indices, sectors, rates, and commodities. Describes WHAT moved,
+    not WHY. Refreshes every 10 minutes.
+    """
+    def _move(ticker):
+        hist = get_history(ticker, period="5d")
+        if hist.empty or len(hist) < 2:
+            return None
+        last = float(hist["Close"].iloc[-1])
+        prev = float(hist["Close"].iloc[-2])
+        if prev == 0:
+            return None
+        return {"price": last, "pct": (last - prev) / prev * 100,
+                "chg": last - prev}
+
+    sp = _move("^GSPC")
+    if not sp:
+        return None
+
+    nasdaq = _move("^IXIC")
+    dow = _move("^DJI")
+    rty = _move("^RUT")
+    vix = _move("^VIX")
+    ten_yr = _move("^TNX")
+    gold = _move("GLD")
+    oil = _move("USO")
+
+    # Sector rotation (1-day)
+    sector_moves = []
+    for name, ticker in SECTOR_ETFS.items():
+        m = _move(ticker)
+        if m:
+            sector_moves.append((name, m["pct"]))
+    sector_moves.sort(key=lambda x: x[1], reverse=True)
+
+    # S&P direction verb — scaled to magnitude for natural prose
+    def _sp_verb(pct):
+        if pct >= 1.5:  return "surged"
+        if pct >= 0.5:  return "climbed"
+        if pct >= 0.1:  return "edged higher"
+        if pct > -0.1:  return "finished little changed"
+        if pct > -0.5:  return "slipped"
+        if pct > -1.5:  return "declined"
+        return "tumbled"
+
+    verb = _sp_verb(sp["pct"])
+    if abs(sp["pct"]) < 0.1:
+        lead = (f"The S&P 500 {verb} at {sp['price']:,.0f}, "
+                f"{'up' if sp['pct'] >= 0 else 'down'} {abs(sp['pct']):.2f}%")
+    else:
+        lead = f"The S&P 500 {verb} {abs(sp['pct']):.2f}% to {sp['price']:,.0f}"
+
+    # Sector leadership
+    sector_sentence = ""
+    if sector_moves:
+        leaders = [s for s in sector_moves[:2] if s[1] > 0]
+        laggards = [s for s in sector_moves[-2:] if s[1] < 0]
+        if leaders and laggards:
+            L = " and ".join(n for n, _ in leaders)
+            G = " and ".join(n for n, _ in laggards)
+            sector_sentence = f"{L} led the gainers while {G} lagged."
+        elif leaders:
+            L = " and ".join(n for n, _ in leaders)
+            sector_sentence = f"{L} led broad sector gains."
+        elif laggards:
+            G = " and ".join(n for n, _ in laggards)
+            sector_sentence = f"{G} lagged across a down session."
+
+    # Other benchmarks
+    other_parts = []
+    if nasdaq:
+        v = "added" if nasdaq["pct"] >= 0 else "lost"
+        other_parts.append(f"the Nasdaq {v} {abs(nasdaq['pct']):.2f}%")
+    if dow:
+        v = "gained" if dow["pct"] >= 0 else "shed"
+        other_parts.append(f"the Dow {v} {abs(dow['chg']):.0f} points")
+    if rty:
+        v = "rose" if rty["pct"] >= 0 else "fell"
+        other_parts.append(f"small caps {v} {abs(rty['pct']):.2f}%")
+    other_sentence = (f"Among major benchmarks, {'; '.join(other_parts)}."
+                      if other_parts else "")
+
+    # Rates / vol / commodities — only mention notable commodity moves
+    macro_parts = []
+    if ten_yr:
+        v = "rose" if ten_yr["pct"] >= 0 else "eased"
+        macro_parts.append(f"the 10-year Treasury yield {v} to {ten_yr['price']:.2f}%")
+    if vix:
+        v = "climbed" if vix["pct"] >= 0 else "eased"
+        macro_parts.append(f"the VIX {v} to {vix['price']:.2f}")
+    if gold and abs(gold["pct"]) >= 0.5:
+        d = "higher" if gold["pct"] >= 0 else "lower"
+        macro_parts.append(f"gold moved {d} by {abs(gold['pct']):.2f}%")
+    if oil and abs(oil["pct"]) >= 1.0:
+        d = "higher" if oil["pct"] >= 0 else "lower"
+        macro_parts.append(f"crude oil traded {d} by {abs(oil['pct']):.2f}%")
+    macro_sentence = (f"Elsewhere, {'; '.join(macro_parts)}."
+                      if macro_parts else "")
+
+    parts = [lead + ".", sector_sentence, other_sentence, macro_sentence]
+    return " ".join(p for p in parts if p)
+
+
 # =========================
 # TOP BANNER
 # =========================
@@ -551,7 +795,7 @@ st.markdown(
     <div class="banner">
         <div class="title">
             <span class="mark">■</span>
-            <span>BC Terminal</span>
+            <span>Knight Terminal</span>
             <span class="sub">Equity Dashboard</span>
         </div>
         <div class="meta">
@@ -585,12 +829,35 @@ chart_type = st.sidebar.radio("Chart Type", ["Candlestick", "Line", "Area"])
 # =========================
 # TABS
 # =========================
-tab_markets, tab_portfolio = st.tabs(["Markets", "Portfolio"])
+tab_markets, tab_portfolio, tab_industries = st.tabs(["Markets", "Portfolio", "Industries"])
 
 # =========================================================================
 # MARKETS TAB
 # =========================================================================
 with tab_markets:
+    # ---- Daily Market Summary ----
+    summary = generate_market_summary()
+    if summary:
+        ts = datetime.now().strftime("%b %d, %Y · %I:%M %p")
+        st.markdown(
+            f"""
+            <div style="border-left: 3px solid #2563eb; padding: 16px 22px;
+                        background: #f9fafb; margin: 4px 0 28px 0;">
+                <div style="font-family: 'Inter', sans-serif; font-size: 11px;
+                            color: #2563eb; letter-spacing: 0.12em;
+                            text-transform: uppercase; margin-bottom: 10px;
+                            font-weight: 600;">
+                    Today's Market &nbsp;·&nbsp; {ts}
+                </div>
+                <div style="font-family: 'Inter', sans-serif; font-size: 15px;
+                            color: #111827; line-height: 1.65;">
+                    {summary}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     # ---- Global Indices ----
     st.markdown('<div class="panel-title">Markets</div>', unsafe_allow_html=True)
     indices = {
@@ -963,3 +1230,136 @@ with tab_portfolio:
         st.dataframe(trades_styled, width="stretch", hide_index=True)
     else:
         st.info("No trades logged yet.")
+
+
+# =========================================================================
+# INDUSTRIES TAB
+# =========================================================================
+with tab_industries:
+    # ---- Sectors ----
+    st.markdown(
+        '<div class="kicker">S&P 500 via SPDR Select Sector ETFs</div>'
+        '<div class="panel-title">Sector Performance</div>',
+        unsafe_allow_html=True,
+    )
+
+    sort_col_sec = st.selectbox(
+        "Sort by",
+        ["1D", "1W", "1M", "3M", "YTD", "1Y"],
+        index=0,
+        key="sector_sort",
+    )
+
+    sector_perf = build_performance_table(SECTOR_ETFS)
+    if not sector_perf.empty:
+        sector_sorted = sector_perf.sort_values(
+            sort_col_sec, ascending=False, na_position="last"
+        )
+        st.dataframe(format_and_style_perf(sector_sorted), width="stretch", hide_index=True)
+    else:
+        st.warning("Could not load sector data. Try refreshing in a minute.")
+
+    # ---- Industries ----
+    st.markdown(
+        '<div class="kicker">Sub-Industry and Macro Proxies</div>'
+        '<div class="panel-title">Industry Groups</div>',
+        unsafe_allow_html=True,
+    )
+
+    sort_col_ind = st.selectbox(
+        "Sort by",
+        ["1D", "1W", "1M", "3M", "YTD", "1Y"],
+        index=0,
+        key="industry_sort",
+    )
+
+    industry_perf = build_performance_table(INDUSTRY_ETFS)
+    if not industry_perf.empty:
+        industry_sorted = industry_perf.sort_values(
+            sort_col_ind, ascending=False, na_position="last"
+        )
+        st.dataframe(format_and_style_perf(industry_sorted), width="stretch", hide_index=True)
+    else:
+        st.warning("Could not load industry data. Try refreshing in a minute.")
+
+    # ---- Relative Performance Chart ----
+    st.markdown(
+        '<div class="kicker">Normalized to 100 at Start</div>'
+        '<div class="panel-title">Relative Performance</div>',
+        unsafe_allow_html=True,
+    )
+
+    all_groups = {**SECTOR_ETFS, **INDUSTRY_ETFS}
+    all_names = list(all_groups.keys())
+    default_selection = [n for n in ["Technology", "Financials", "Energy", "Health Care"]
+                         if n in all_names]
+
+    ctrl_left, ctrl_right = st.columns([3, 1])
+    with ctrl_left:
+        selected = st.multiselect(
+            "Select groups to compare",
+            all_names,
+            default=default_selection,
+            key="rel_perf_select",
+        )
+    with ctrl_right:
+        rel_period = st.select_slider(
+            "Lookback",
+            options=["1mo", "3mo", "6mo", "1y"],
+            value="3mo",
+            key="rel_perf_period",
+        )
+
+    if not selected:
+        st.info("Pick at least one group above to see relative performance.")
+    else:
+        # Distinct colors — extended if lots selected
+        palette = ["#2563eb", "#059669", "#dc2626", "#d97706",
+                   "#7c3aed", "#db2777", "#0891b2", "#ca8a04",
+                   "#4338ca", "#047857", "#b91c1c", "#a16207"]
+        rel_fig = go.Figure()
+
+        for i, name in enumerate(selected):
+            ticker = all_groups[name]
+            rel_hist = get_history(ticker, period=rel_period)
+            if rel_hist.empty or len(rel_hist) < 2:
+                continue
+            closes = rel_hist["Close"]
+            normalized = closes / float(closes.iloc[0]) * 100
+            rel_fig.add_trace(go.Scatter(
+                x=normalized.index,
+                y=normalized.values,
+                mode="lines",
+                name=name,
+                line=dict(color=palette[i % len(palette)], width=2),
+                hovertemplate=f"<b>{name}</b><br>%{{x|%b %d, %Y}}<br>%{{y:.2f}}<extra></extra>",
+            ))
+
+        # Reference line at 100
+        rel_fig.add_hline(
+            y=100, line_dash="dash", line_color="#9ca3af", line_width=1,
+            annotation_text="Start", annotation_position="right",
+            annotation_font=dict(family="Inter, sans-serif", size=10, color="#9ca3af"),
+        )
+
+        rel_fig.update_layout(
+            template="simple_white",
+            paper_bgcolor="#ffffff",
+            plot_bgcolor="#ffffff",
+            height=420,
+            margin=dict(l=10, r=10, t=10, b=10),
+            showlegend=True,
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
+                font=dict(family="Inter, sans-serif", size=11, color="#6b7280"),
+            ),
+            font=dict(family="Inter, sans-serif", color="#111827", size=11),
+            hovermode="x unified",
+        )
+        rel_fig.update_xaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
+                             linecolor="#e5e7eb", showline=True)
+        rel_fig.update_yaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
+                             linecolor="#e5e7eb", showline=True,
+                             tickformat=".1f")
+
+        st.plotly_chart(rel_fig, width="stretch")
