@@ -1033,7 +1033,7 @@ with tab_markets:
             options=PERIOD_OPTIONS,
             default="6M",
             label_visibility="collapsed",
-            key="chart_period_sc",
+            key="chart_period_v2",
         )
         if not period_label:
             period_label = "6M"
@@ -1205,6 +1205,116 @@ with tab_markets:
         with st.expander(f"About {info.get('longName', chart_ticker)}"):
             st.write(desc)
 
+    # ---- Stock Comparison Chart ----
+    st.markdown(
+        '<div class="kicker">Normalized to 100 at Start</div>'
+        '<div class="panel-title">Stock Comparison</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Initialize comparison list in session state
+    if "compare_tickers" not in st.session_state:
+        st.session_state.compare_tickers = ["AAPL", "MSFT", "NVDA", "GOOGL"]
+
+    # Add-ticker form
+    with st.form("compare_add_form", clear_on_submit=True):
+        cmp_left, cmp_right = st.columns([5, 1])
+        with cmp_left:
+            new_cmp = st.text_input(
+                "Add ticker to compare",
+                placeholder="Add tickers to compare (e.g. AMD, TSLA, ^GSPC)",
+                label_visibility="collapsed",
+            )
+        with cmp_right:
+            cmp_submit = st.form_submit_button("Add", use_container_width=True)
+        if cmp_submit and new_cmp:
+            new_clean = new_cmp.strip().upper()
+            if new_clean and new_clean not in st.session_state.compare_tickers:
+                st.session_state.compare_tickers.append(new_clean)
+                st.rerun()
+
+    # Render selected tickers as removable pills
+    if st.session_state.compare_tickers:
+        pill_cols = st.columns(min(len(st.session_state.compare_tickers), 8))
+        for i, t in enumerate(list(st.session_state.compare_tickers)):
+            with pill_cols[i % len(pill_cols)]:
+                if st.button(f"{t} ×", key=f"cmp_rm_{t}",
+                             help=f"Remove {t}", use_container_width=True):
+                    st.session_state.compare_tickers.remove(t)
+                    st.rerun()
+
+    # Period selector
+    cmp_period = st.segmented_control(
+        "Comparison Period",
+        options=PERIOD_OPTIONS,
+        default="6M",
+        label_visibility="collapsed",
+        key="cmp_period_v2",
+    )
+    if not cmp_period:
+        cmp_period = "6M"
+
+    if not st.session_state.compare_tickers:
+        st.info("Add at least one ticker above to see a comparison.")
+    else:
+        cmp_palette = ["#2563eb", "#059669", "#dc2626", "#d97706",
+                       "#7c3aed", "#db2777", "#0891b2", "#ca8a04",
+                       "#4338ca", "#047857", "#b91c1c", "#a16207"]
+        cmp_fig = go.Figure()
+        any_data = False
+
+        for i, t in enumerate(st.session_state.compare_tickers):
+            cmp_hist = get_chart_history(t, cmp_period)
+            if cmp_hist.empty or len(cmp_hist) < 2:
+                continue
+            any_data = True
+            closes = cmp_hist["Close"]
+            start_px = float(closes.iloc[0])
+            end_px = float(closes.iloc[-1])
+            ret_pct = (end_px - start_px) / start_px * 100
+            normalized = closes / start_px * 100
+
+            sign = "+" if ret_pct >= 0 else ""
+            legend_name = f"{t}  {sign}{ret_pct:.2f}%"
+
+            cmp_fig.add_trace(go.Scatter(
+                x=normalized.index,
+                y=normalized.values,
+                mode="lines",
+                name=legend_name,
+                line=dict(color=cmp_palette[i % len(cmp_palette)], width=2),
+                hovertemplate=f"<b>{t}</b><br>%{{x|%b %d, %Y}}<br>%{{y:.2f}}<extra></extra>",
+            ))
+
+        if not any_data:
+            st.warning("No data available for the selected tickers.")
+        else:
+            cmp_fig.add_hline(
+                y=100, line_dash="dash", line_color="#9ca3af", line_width=1,
+                annotation_text="Start", annotation_position="right",
+                annotation_font=dict(family="Inter, sans-serif", size=10, color="#9ca3af"),
+            )
+            cmp_fig.update_layout(
+                template="simple_white",
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#ffffff",
+                height=420,
+                margin=dict(l=10, r=10, t=10, b=10),
+                showlegend=True,
+                legend=dict(
+                    orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
+                    font=dict(family="JetBrains Mono, monospace", size=12, color="#111827"),
+                ),
+                font=dict(family="Inter, sans-serif", color="#111827", size=11),
+                hovermode="x unified",
+            )
+            cmp_fig.update_xaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
+                                 linecolor="#e5e7eb", showline=True)
+            cmp_fig.update_yaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
+                                 linecolor="#e5e7eb", showline=True,
+                                 tickformat=".1f")
+            st.plotly_chart(cmp_fig, width="stretch")
+
     # ---- Macro News ----
     st.markdown('<div class="panel-title">Macro Headlines</div>', unsafe_allow_html=True)
     news = fetch_macro_news(limit=10)
@@ -1369,7 +1479,7 @@ with tab_industries:
         options=PERIOD_OPTIONS,
         default="3M",
         label_visibility="collapsed",
-        key="rel_perf_period_sc",
+        key="rel_perf_period_v2",
     )
     if not rel_period:
         rel_period = "3M"
