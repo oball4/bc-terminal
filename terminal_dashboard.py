@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # =========================
 # PAGE CONFIG
@@ -14,40 +14,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-# =========================
-# FUND TRADES — LOG EACH BUY/SELL HERE
-# =========================
-# Format:
-#   {"date": "YYYY-MM-DD", "ticker": "XXX", "action": "BUY"|"SELL", "shares": N, "price": P.PP}
-FUND_TRADES = [
-    {"date": "2026-04-21", "ticker": "FCFS", "action": "BUY", "shares": 15, "price": 206.50},
-]
-
-
-def aggregate_trades(trades):
-    """Roll up a trade log into current positions (average-cost method)."""
-    positions = {}
-    for tr in trades:
-        t = tr["ticker"]
-        shares, price = tr["shares"], tr["price"]
-        action = tr.get("action", "BUY").upper()
-        pos = positions.setdefault(t, {"shares": 0, "total_cost": 0.0})
-        if action == "BUY":
-            pos["shares"] += shares
-            pos["total_cost"] += shares * price
-        elif action == "SELL":
-            if pos["shares"] > 0:
-                avg = pos["total_cost"] / pos["shares"]
-                pos["shares"] -= shares
-                pos["total_cost"] -= shares * avg
-    return [
-        {"ticker": t, "shares": p["shares"], "cost_basis": p["total_cost"] / p["shares"]}
-        for t, p in positions.items() if p["shares"] > 0
-    ]
-
-
-FUND_HOLDINGS = aggregate_trades(FUND_TRADES)
 
 # =========================
 # SECTOR & INDUSTRY ETFs
@@ -410,14 +376,6 @@ def get_history(ticker, period="1d", interval="1d"):
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def get_history_from(ticker, start_date):
-    try:
-        return yf.Ticker(ticker, session=get_session()).history(start=start_date)
-    except Exception:
-        return pd.DataFrame()
-
-
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_info(ticker):
     try:
@@ -427,11 +385,16 @@ def get_info(ticker):
 
 
 def color_signed(val):
+    """Green for positive, red for negative. Handles strings, numbers, and NaN."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
     try:
         v = float(
             str(val).replace("%", "").replace("+", "")
             .replace("$", "").replace(",", "")
         )
+        if pd.isna(v):
+            return ""
         return "color: #059669" if v >= 0 else "color: #dc2626"
     except Exception:
         return ""
@@ -542,64 +505,6 @@ def format_news_time(pub_time):
         return ""
 
 
-def compute_portfolio_history(trades):
-    """Daily market value timeline for the portfolio, vs cumulative cost basis."""
-    if not trades:
-        return pd.DataFrame()
-    trades_sorted = sorted(trades, key=lambda t: t["date"])
-    start = trades_sorted[0]["date"]
-    tickers = sorted({t["ticker"] for t in trades})
-
-    price_series = {}
-    for t in tickers:
-        hist = get_history_from(t, start)
-        if hist.empty:
-            continue
-        s = hist["Close"].copy()
-        s.index = s.index.tz_localize(None).normalize()
-        price_series[t] = s
-
-    if not price_series:
-        return pd.DataFrame()
-
-    all_dates = sorted(set().union(*(s.index for s in price_series.values())))
-    records = []
-    for date in all_dates:
-        total_value, total_cost = 0.0, 0.0
-        for ticker in tickers:
-            shares, cost = 0, 0.0
-            for tr in trades:
-                trade_dt = pd.Timestamp(tr["date"]).normalize()
-                if trade_dt > date or tr["ticker"] != ticker:
-                    continue
-                if tr["action"].upper() == "BUY":
-                    shares += tr["shares"]
-                    cost += tr["shares"] * tr["price"]
-                elif tr["action"].upper() == "SELL":
-                    if shares > 0:
-                        avg = cost / shares
-                        shares -= tr["shares"]
-                        cost -= tr["shares"] * avg
-            if shares <= 0:
-                continue
-            series = price_series.get(ticker)
-            if series is None:
-                continue
-            if date in series.index:
-                price = series.loc[date]
-            else:
-                prior = series[series.index <= date]
-                if prior.empty:
-                    continue
-                price = prior.iloc[-1]
-            total_value += shares * price
-            total_cost += cost
-        if total_value > 0:
-            records.append({"Date": date, "Value": total_value, "Cost": total_cost})
-
-    return pd.DataFrame(records)
-
-
 def compute_returns_from_series(close_series):
     """Compute 1D/1W/1M/3M/YTD/1Y returns from a Close price Series.
 
@@ -657,18 +562,27 @@ def build_performance_table(ticker_map):
 
 
 def format_and_style_perf(df):
-    """Format the performance DataFrame for display and apply green/red coloring."""
-    d = df.copy()
-    d["Last"] = d["Last"].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "—")
-    for col in ["1D", "1W", "1M", "3M", "YTD", "1Y"]:
-        d[col] = d[col].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "—")
-    d = d.rename(columns={
+    """Style a performance DataFrame. Keeps underlying values numeric so that
+    clicking a column header in st.dataframe sorts correctly (pandas/Streamlit
+    sort on the raw values, not the formatted display strings)."""
+    d = df.rename(columns={
         "1D": "1D %", "1W": "1W %", "1M": "1M %",
         "3M": "3M %", "YTD": "YTD %", "1Y": "1Y %",
     })
     pct_cols = ["1D %", "1W %", "1M %", "3M %", "YTD %", "1Y %"]
+
+    def _pct_fmt(v):
+        return f"{v:+.2f}%" if pd.notna(v) else "—"
+
+    def _last_fmt(v):
+        return f"{v:,.2f}" if pd.notna(v) else "—"
+
+    formatter = {col: _pct_fmt for col in pct_cols}
+    formatter["Last"] = _last_fmt
+
     return (
         d.style
+        .format(formatter)
         .set_properties(**{
             "background-color": "#ffffff",
             "color": "#111827",
@@ -787,6 +701,142 @@ def generate_market_summary():
 
 
 # =========================
+# CHART PERIODS
+# =========================
+PERIOD_OPTIONS = ["1D", "5D", "1M", "6M", "YTD", "1Y", "3Y", "5Y", "All"]
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_chart_history(ticker, period_label):
+    """Fetch chart history for a user-friendly period label.
+
+    1D / 5D use intraday intervals; everything else is daily bars.
+    YTD computes from Jan 1 of current year; All uses yfinance's full history.
+    """
+    try:
+        tk = yf.Ticker(ticker, session=get_session())
+        if period_label == "1D":
+            return tk.history(period="1d", interval="5m")
+        if period_label == "5D":
+            return tk.history(period="5d", interval="30m")
+        if period_label == "YTD":
+            start = f"{datetime.now().year}-01-01"
+            return tk.history(start=start, interval="1d")
+        if period_label == "All":
+            return tk.history(period="max", interval="1d")
+        mapping = {"1M": "1mo", "6M": "6mo", "1Y": "1y", "3Y": "3y", "5Y": "5y"}
+        return tk.history(period=mapping.get(period_label, "6mo"), interval="1d")
+    except Exception:
+        return pd.DataFrame()
+
+
+# =========================
+# ECONOMIC CALENDAR
+# =========================
+# Known high-impact events. FOMC meeting dates come from the Federal Reserve's
+# published annual schedule. CPI / PPI / GDP / Retail Sales dates are the BLS
+# and BEA's typical release patterns and should be verified day-of via the
+# official sources before trading decisions.
+STATIC_ECONOMIC_EVENTS = [
+    # FOMC 2026 — from Federal Reserve publication
+    {"date": "2026-04-29", "event": "FOMC Rate Decision",     "category": "Fed",       "importance": "High"},
+    {"date": "2026-06-17", "event": "FOMC Rate Decision",     "category": "Fed",       "importance": "High"},
+    {"date": "2026-07-29", "event": "FOMC Rate Decision",     "category": "Fed",       "importance": "High"},
+    {"date": "2026-09-16", "event": "FOMC Rate Decision",     "category": "Fed",       "importance": "High"},
+    {"date": "2026-10-28", "event": "FOMC Rate Decision",     "category": "Fed",       "importance": "High"},
+    {"date": "2026-12-09", "event": "FOMC Rate Decision",     "category": "Fed",       "importance": "High"},
+    # CPI — typically second Tuesday of the month
+    {"date": "2026-05-12", "event": "CPI (April)",            "category": "Inflation", "importance": "High"},
+    {"date": "2026-06-11", "event": "CPI (May)",              "category": "Inflation", "importance": "High"},
+    {"date": "2026-07-14", "event": "CPI (June)",             "category": "Inflation", "importance": "High"},
+    {"date": "2026-08-12", "event": "CPI (July)",             "category": "Inflation", "importance": "High"},
+    {"date": "2026-09-10", "event": "CPI (August)",           "category": "Inflation", "importance": "High"},
+    {"date": "2026-10-13", "event": "CPI (September)",        "category": "Inflation", "importance": "High"},
+    {"date": "2026-11-12", "event": "CPI (October)",          "category": "Inflation", "importance": "High"},
+    {"date": "2026-12-10", "event": "CPI (November)",         "category": "Inflation", "importance": "High"},
+    # PPI — usually day after CPI
+    {"date": "2026-05-13", "event": "PPI (April)",            "category": "Inflation", "importance": "Medium"},
+    {"date": "2026-06-12", "event": "PPI (May)",              "category": "Inflation", "importance": "Medium"},
+    {"date": "2026-07-15", "event": "PPI (June)",             "category": "Inflation", "importance": "Medium"},
+    {"date": "2026-08-13", "event": "PPI (July)",             "category": "Inflation", "importance": "Medium"},
+    # GDP (quarterly)
+    {"date": "2026-04-30", "event": "GDP Q1 (Advance)",       "category": "Growth",    "importance": "High"},
+    {"date": "2026-05-29", "event": "GDP Q1 (2nd Estimate)",  "category": "Growth",    "importance": "Medium"},
+    {"date": "2026-06-26", "event": "GDP Q1 (3rd Estimate)",  "category": "Growth",    "importance": "Low"},
+    {"date": "2026-07-30", "event": "GDP Q2 (Advance)",       "category": "Growth",    "importance": "High"},
+    {"date": "2026-08-28", "event": "GDP Q2 (2nd Estimate)",  "category": "Growth",    "importance": "Medium"},
+    {"date": "2026-10-30", "event": "GDP Q3 (Advance)",       "category": "Growth",    "importance": "High"},
+    # Retail Sales (mid-month)
+    {"date": "2026-05-15", "event": "Retail Sales (April)",   "category": "Consumer",  "importance": "Medium"},
+    {"date": "2026-06-17", "event": "Retail Sales (May)",     "category": "Consumer",  "importance": "Medium"},
+    {"date": "2026-07-16", "event": "Retail Sales (June)",    "category": "Consumer",  "importance": "Medium"},
+    {"date": "2026-08-17", "event": "Retail Sales (July)",    "category": "Consumer",  "importance": "Medium"},
+    # Earnings season kickoffs (rough)
+    {"date": "2026-07-14", "event": "Q2 Earnings Season Begins", "category": "Earnings", "importance": "Medium"},
+    {"date": "2026-10-13", "event": "Q3 Earnings Season Begins", "category": "Earnings", "importance": "Medium"},
+]
+
+
+def _first_friday(year, month):
+    """First Friday of a given month — used for NFP release dates."""
+    first = datetime(year, month, 1)
+    offset = (4 - first.weekday()) % 7  # Friday is weekday index 4
+    return (first + timedelta(days=offset)).date()
+
+
+def get_upcoming_events(days_ahead=60):
+    """Compile upcoming events: static list + dynamically-computed NFP dates.
+
+    NFP is always the first Friday of the month, so we compute it rather than
+    hard-code. Other monthly economic data releases (CPI/PPI/Retail Sales) use
+    the typical pattern but actual dates are set by BLS each month.
+    """
+    today = datetime.now().date()
+    cutoff = today + timedelta(days=days_ahead)
+    events = []
+
+    # Static events within the window
+    for e in STATIC_ECONOMIC_EVENTS:
+        try:
+            dt = datetime.strptime(e["date"], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if today <= dt <= cutoff:
+            events.append({**e, "_date": dt})
+
+    # Dynamically compute NFP (first Friday of each month in window)
+    current = today.replace(day=1)
+    while current <= cutoff:
+        nfp = _first_friday(current.year, current.month)
+        if today <= nfp <= cutoff:
+            prev_month_date = current - timedelta(days=1)
+            prev_month_name = prev_month_date.strftime("%B") if prev_month_date.month != current.month else current.strftime("%B")
+            events.append({
+                "date": nfp.strftime("%Y-%m-%d"),
+                "event": f"Nonfarm Payrolls ({prev_month_name})",
+                "category": "Jobs",
+                "importance": "High",
+                "_date": nfp,
+            })
+        # Advance to next month
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+
+    # Dedupe by (date, event) just in case
+    seen, unique = set(), []
+    for e in events:
+        key = (e["_date"], e["event"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(e)
+
+    unique.sort(key=lambda x: x["_date"])
+    return unique
+
+
+# =========================
 # TOP BANNER
 # =========================
 today = datetime.now()
@@ -808,28 +858,113 @@ st.markdown(
 )
 
 # =========================
-# SIDEBAR (applies to Markets tab)
+# SIDEBAR — Watchlist
 # =========================
-st.sidebar.markdown('<div class="panel-title">Sector</div>', unsafe_allow_html=True)
+# Subsectors dict is used by the Financials tab
 subsectors = {
     "Banks":          ["JPM", "BAC", "WFC", "C", "GS", "MS"],
     "Asset Managers": ["BLK", "TROW", "KKR", "APO", "BX"],
     "Insurance":      ["AIG", "ALL", "MET", "PRU", "TRV"],
     "Payments":       ["V", "MA", "PYPL", "AXP", "COF"],
 }
-selected_sector = st.sidebar.radio("Subsector", list(subsectors.keys()))
-tickers = subsectors[selected_sector]
 
-st.sidebar.markdown('<div class="panel-title">Chart</div>', unsafe_allow_html=True)
-period = st.sidebar.select_slider(
-    "Period", options=["1mo", "3mo", "6mo", "1y", "2y", "5y"], value="6mo"
-)
-chart_type = st.sidebar.radio("Chart Type", ["Candlestick", "Line", "Area"])
+# Initialize watchlist — reads from URL query params if present (so bookmarking
+# the URL preserves the watchlist across sessions / devices), otherwise uses
+# sensible defaults.
+DEFAULT_WATCHLIST = ["^GSPC", "AAPL", "MSFT", "NVDA", "META", "TSLA"]
+
+
+def _watchlist_from_query():
+    try:
+        qp_val = st.query_params.get("wl", "")
+    except Exception:
+        qp_val = ""
+    if not qp_val:
+        return None
+    parts = [t.strip().upper() for t in qp_val.split(",") if t.strip()]
+    # Dedupe while preserving order
+    seen, unique = set(), []
+    for t in parts:
+        if t not in seen:
+            seen.add(t)
+            unique.append(t)
+    return unique or None
+
+
+def _sync_watchlist_to_query():
+    """Write the current watchlist to the URL so refreshes/bookmarks keep it."""
+    try:
+        if st.session_state.watchlist:
+            st.query_params["wl"] = ",".join(st.session_state.watchlist)
+        else:
+            # Clear the param rather than leaving an empty value
+            if "wl" in st.query_params:
+                del st.query_params["wl"]
+    except Exception:
+        pass  # older Streamlit — fail silently, session_state still works
+
+
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = _watchlist_from_query() or list(DEFAULT_WATCHLIST)
+
+st.sidebar.markdown('<div class="panel-title">Watchlist</div>', unsafe_allow_html=True)
+
+# Add-ticker form (clears input on submit)
+with st.sidebar.form("add_watchlist_form", clear_on_submit=True):
+    new_ticker = st.text_input(
+        "Add",
+        placeholder="Add ticker (e.g. TSLA)",
+        label_visibility="collapsed",
+    )
+    submitted = st.form_submit_button("Add to Watchlist", use_container_width=True)
+    if submitted and new_ticker:
+        new_clean = new_ticker.strip().upper()
+        if new_clean and new_clean not in st.session_state.watchlist:
+            st.session_state.watchlist.append(new_clean)
+            _sync_watchlist_to_query()
+            st.rerun()
+
+# Render each watchlist row with inline remove button
+for t in list(st.session_state.watchlist):
+    c_left, c_right = st.sidebar.columns([5, 1], gap="small", vertical_alignment="center")
+    with c_left:
+        hist = get_history(t, period="5d")
+        if not hist.empty and len(hist) >= 2:
+            price = float(hist["Close"].iloc[-1])
+            prev = float(hist["Close"].iloc[-2])
+            pct = (price - prev) / prev * 100
+            pct_color = "#059669" if pct >= 0 else "#dc2626"
+            prefix = "" if t.startswith("^") else "$"
+            st.markdown(
+                f'<div style="font-family:\'JetBrains Mono\',monospace; '
+                f'font-size:12px; padding:6px 0; border-bottom:1px solid #f3f4f6;">'
+                f'<div style="display:flex; justify-content:space-between; align-items:baseline;">'
+                f'<span style="font-weight:600; color:#111827;">{t}</span>'
+                f'<span style="color:{pct_color}; font-weight:500;">{pct:+.2f}%</span>'
+                f'</div>'
+                f'<div style="color:#6b7280; font-size:11px; margin-top:2px;">{prefix}{price:,.2f}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f'<div style="font-family:\'JetBrains Mono\',monospace; '
+                f'font-size:12px; padding:6px 0; color:#9ca3af; '
+                f'border-bottom:1px solid #f3f4f6;">{t} — no data</div>',
+                unsafe_allow_html=True,
+            )
+    with c_right:
+        if st.button("×", key=f"wl_rm_{t}", help=f"Remove {t}"):
+            st.session_state.watchlist.remove(t)
+            _sync_watchlist_to_query()
+            st.rerun()
 
 # =========================
 # TABS
 # =========================
-tab_markets, tab_portfolio, tab_industries = st.tabs(["Markets", "Portfolio", "Industries"])
+tab_markets, tab_industries, tab_calendar, tab_financials = st.tabs(
+    ["Markets", "Industries", "Calendar", "Financials"]
+)
 
 # =========================================================================
 # MARKETS TAB
@@ -878,162 +1013,142 @@ with tab_markets:
         pct = (price - prev) / prev * 100
         cols[i].metric(label=name, value=f"{price:,.2f}", delta=f"{pct:+.2f}%")
 
-    # ---- Sector Quotes + Chart ----
-    col1, col2 = st.columns([2, 3])
+    # ---- Chart (full-width) ----
+    chart_ticker = st.text_input(
+        "Ticker",
+        value="^GSPC",
+        placeholder="e.g. AAPL, NVDA, ^GSPC, BTC-USD",
+        help="Any ticker yfinance supports. Indices use ^ prefix (^GSPC, ^IXIC, ^VIX). "
+             "Crypto uses -USD suffix (BTC-USD, ETH-USD). International tickers use "
+             "exchange suffixes (HSBA.L for London, 7203.T for Tokyo).",
+        key="chart_ticker_input",
+    ).strip().upper() or "^GSPC"
 
-    with col1:
+    # Period selector (segmented control) + chart type (selectbox) side by side
+    period_col, type_col = st.columns([3, 1])
+    with period_col:
+        period_label = st.segmented_control(
+            "Period",
+            options=PERIOD_OPTIONS,
+            default="6M",
+            label_visibility="collapsed",
+            key="chart_period_sc",
+        )
+        if not period_label:
+            period_label = "6M"
+    with type_col:
+        chart_type = st.selectbox(
+            "Chart Type",
+            ["Candlestick", "Line", "Area"],
+            index=0,
+            label_visibility="collapsed",
+            key="chart_type_select",
+        )
+
+    # Fetch history for the selected period
+    hist = get_chart_history(chart_ticker, period_label)
+
+    # Header row: ticker info on the left, period return on the right
+    h_left, h_right = st.columns([3, 1])
+    with h_left:
+        price_line_html = ""
+        if not hist.empty:
+            current = float(hist["Close"].iloc[-1])
+            prefix = "" if chart_ticker.startswith("^") else "$"
+            price_line_html = (
+                f'<div style="font-family:\'JetBrains Mono\',monospace; '
+                f'font-size:32px; font-weight:700; color:#111827; '
+                f'letter-spacing:-0.02em; margin-top:6px;">'
+                f'{prefix}{current:,.2f}</div>'
+            )
         st.markdown(
-            f'<div class="kicker">Sector</div>'
-            f'<div class="panel-title">{selected_sector}</div>',
+            f'<div class="kicker">{period_label} · {chart_type}</div>'
+            f'<div class="panel-title">{chart_ticker}</div>'
+            f'{price_line_html}',
             unsafe_allow_html=True,
         )
-        rows = []
-        for t in tickers:
-            hist = get_history(t, period="5d")
-            if hist.empty:
-                continue
-            price = hist["Close"].iloc[-1]
-            prev = hist["Close"].iloc[-2] if len(hist) >= 2 else hist["Open"].iloc[-1]
-            pct = (price - prev) / prev * 100
-            info = get_info(t)
-            rows.append({
-                "Ticker":  t,
-                "Last":    f"{price:,.2f}",
-                "Chg%":    f"{pct:+.2f}%",
-                "Mkt Cap": fmt_big(info.get("marketCap")),
-                "P/E":     fmt_num(info.get("trailingPE")),
-            })
-
-        df = pd.DataFrame(rows)
-        styled = (
-            df.style
-            .set_properties(**{
-                "background-color": "#ffffff",
-                "color": "#111827",
-                "font-family": "JetBrains Mono, monospace",
-                "font-size": "13px",
-            })
-            .map(color_signed, subset=["Chg%"])
-        )
-        st.dataframe(styled, width="stretch", hide_index=True)
-
-    with col2:
-        pick_col, custom_col = st.columns([1, 1])
-        with pick_col:
-            selected_ticker = st.selectbox("Sector Ticker", tickers, key="chart_ticker")
-        with custom_col:
-            custom_ticker = st.text_input(
-                "Or any ticker",
-                placeholder="e.g. NVDA, AAPL, TSLA, ^GSPC",
-                key="custom_ticker",
-            ).strip().upper()
-
-        chart_ticker = custom_ticker if custom_ticker else selected_ticker
-
-        # Fetch history first so we can compute period return for the header
-        hist = get_history(chart_ticker, period=period)
-
-        # Header row: ticker info on the left, period return on the right
-        h_left, h_right = st.columns([3, 1])
-        with h_left:
-            price_line_html = ""
-            if not hist.empty:
-                current = float(hist["Close"].iloc[-1])
-                prefix = "" if chart_ticker.startswith("^") else "$"
-                price_line_html = (
-                    f'<div style="font-family:\'JetBrains Mono\',monospace; '
-                    f'font-size:28px; font-weight:700; color:#111827; '
-                    f'letter-spacing:-0.02em; margin-top:6px;">'
-                    f'{prefix}{current:,.2f}</div>'
-                )
+    with h_right:
+        if not hist.empty and len(hist) >= 2:
+            start_px = float(hist["Close"].iloc[0])
+            end_px = float(hist["Close"].iloc[-1])
+            ret_pct = (end_px - start_px) / start_px * 100
+            ret_abs = end_px - start_px
+            sign = "+" if ret_pct >= 0 else ""
+            color = "#059669" if ret_pct >= 0 else "#dc2626"
             st.markdown(
-                f'<div class="kicker">{period.upper()} · {chart_type}</div>'
-                f'<div class="panel-title">{chart_ticker}</div>'
-                f'{price_line_html}',
+                f'<div style="text-align:right; padding-top:10px;">'
+                f'<div style="font-family:Inter,sans-serif; font-size:10px; '
+                f'color:#6b7280; text-transform:uppercase; letter-spacing:0.1em; '
+                f'margin-bottom:2px;">{period_label} Return</div>'
+                f'<div style="font-family:\'JetBrains Mono\',monospace; '
+                f'font-size:24px; font-weight:600; color:{color};">'
+                f'{sign}{ret_pct:.2f}%</div>'
+                f'<div style="font-family:\'JetBrains Mono\',monospace; '
+                f'font-size:11px; color:#6b7280;">'
+                f'{sign}${ret_abs:,.2f} per share</div>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
-        with h_right:
-            if not hist.empty and len(hist) >= 2:
-                start_px = float(hist["Close"].iloc[0])
-                end_px = float(hist["Close"].iloc[-1])
-                ret_pct = (end_px - start_px) / start_px * 100
-                ret_abs = end_px - start_px
-                sign = "+" if ret_pct >= 0 else ""
-                color = "#059669" if ret_pct >= 0 else "#dc2626"
-                st.markdown(
-                    f'<div style="text-align:right; padding-top:10px;">'
-                    f'<div style="font-family:Inter,sans-serif; font-size:10px; '
-                    f'color:#6b7280; text-transform:uppercase; letter-spacing:0.1em; '
-                    f'margin-bottom:2px;">{period.upper()} Return</div>'
-                    f'<div style="font-family:\'JetBrains Mono\',monospace; '
-                    f'font-size:22px; font-weight:600; color:{color};">'
-                    f'{sign}{ret_pct:.2f}%</div>'
-                    f'<div style="font-family:\'JetBrains Mono\',monospace; '
-                    f'font-size:11px; color:#6b7280;">'
-                    f'{sign}${ret_abs:,.2f} per share</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
 
-        if hist.empty:
-            st.warning(f"No data found for '{chart_ticker}'. Check the symbol and try again.")
+    if hist.empty:
+        st.warning(f"No data found for '{chart_ticker}'. Check the symbol and try again.")
+    else:
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True,
+            vertical_spacing=0.03, row_heights=[0.75, 0.25],
+        )
+
+        if chart_type == "Candlestick":
+            fig.add_trace(go.Candlestick(
+                x=hist.index,
+                open=hist["Open"], high=hist["High"],
+                low=hist["Low"], close=hist["Close"],
+                increasing_line_color="#059669",
+                decreasing_line_color="#dc2626",
+            ), row=1, col=1)
+        elif chart_type == "Area":
+            fig.add_trace(go.Scatter(
+                x=hist.index, y=hist["Close"],
+                mode="lines", fill="tozeroy",
+                line=dict(color="#2563eb", width=2),
+                fillcolor="rgba(37,99,235,0.12)",
+            ), row=1, col=1)
+            fig.update_yaxes(
+                range=[hist["Close"].min() * 0.95, hist["Close"].max() * 1.05],
+                row=1, col=1,
+            )
         else:
-            fig = make_subplots(
-                rows=2, cols=1, shared_xaxes=True,
-                vertical_spacing=0.03, row_heights=[0.75, 0.25],
-            )
+            fig.add_trace(go.Scatter(
+                x=hist.index, y=hist["Close"],
+                mode="lines",
+                line=dict(color="#2563eb", width=2),
+            ), row=1, col=1)
 
-            if chart_type == "Candlestick":
-                fig.add_trace(go.Candlestick(
-                    x=hist.index,
-                    open=hist["Open"], high=hist["High"],
-                    low=hist["Low"], close=hist["Close"],
-                    increasing_line_color="#059669",
-                    decreasing_line_color="#dc2626",
-                ), row=1, col=1)
-            elif chart_type == "Area":
-                fig.add_trace(go.Scatter(
-                    x=hist.index, y=hist["Close"],
-                    mode="lines", fill="tozeroy",
-                    line=dict(color="#2563eb", width=2),
-                    fillcolor="rgba(37,99,235,0.12)",
-                ), row=1, col=1)
-                fig.update_yaxes(
-                    range=[hist["Close"].min() * 0.95, hist["Close"].max() * 1.05],
-                    row=1, col=1,
-                )
-            else:
-                fig.add_trace(go.Scatter(
-                    x=hist.index, y=hist["Close"],
-                    mode="lines",
-                    line=dict(color="#2563eb", width=2),
-                ), row=1, col=1)
+        vol_colors = [
+            "#059669" if c >= o else "#dc2626"
+            for o, c in zip(hist["Open"], hist["Close"])
+        ]
+        fig.add_trace(go.Bar(
+            x=hist.index, y=hist["Volume"],
+            marker_color=vol_colors, showlegend=False,
+        ), row=2, col=1)
 
-            vol_colors = [
-                "#059669" if c >= o else "#dc2626"
-                for o, c in zip(hist["Open"], hist["Close"])
-            ]
-            fig.add_trace(go.Bar(
-                x=hist.index, y=hist["Volume"],
-                marker_color=vol_colors, showlegend=False,
-            ), row=2, col=1)
+        fig.update_layout(
+            template="simple_white",
+            paper_bgcolor="#ffffff",
+            plot_bgcolor="#ffffff",
+            height=620,
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis_rangeslider_visible=False,
+            showlegend=False,
+            font=dict(family="Inter, sans-serif", color="#111827", size=11),
+        )
+        fig.update_xaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
+                         linecolor="#e5e7eb", showline=True)
+        fig.update_yaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
+                         linecolor="#e5e7eb", showline=True)
 
-            fig.update_layout(
-                template="simple_white",
-                paper_bgcolor="#ffffff",
-                plot_bgcolor="#ffffff",
-                height=500,
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis_rangeslider_visible=False,
-                showlegend=False,
-                font=dict(family="Inter, sans-serif", color="#111827", size=11),
-            )
-            fig.update_xaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
-                             linecolor="#e5e7eb", showline=True)
-            fig.update_yaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
-                             linecolor="#e5e7eb", showline=True)
-
-            st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, width="stretch")
 
     # ---- Fundamentals ----
     st.markdown(
@@ -1043,29 +1158,33 @@ with tab_markets:
     )
     info = get_info(chart_ticker)
 
+    # Earnings yield = 1 / P/E (decimal form, fmt_pct will show as percentage)
+    te_pe = info.get("trailingPE")
+    earnings_yield = (1 / te_pe) if te_pe and te_pe != 0 else None
+
     r1 = st.columns(4)
-    r1[0].metric("P/E (TTM)",    fmt_num(info.get("trailingPE")))
-    r1[1].metric("Forward P/E",  fmt_num(info.get("forwardPE")))
-    r1[2].metric("Price / Book", fmt_num(info.get("priceToBook")))
-    r1[3].metric("Beta",         fmt_num(info.get("beta")))
+    r1[0].metric("P/E (TTM)",      fmt_num(info.get("trailingPE")))
+    r1[1].metric("Forward P/E",    fmt_num(info.get("forwardPE")))
+    r1[2].metric("EPS (TTM)",      fmt_num(info.get("trailingEps")))
+    r1[3].metric("Earnings Yield", fmt_pct(earnings_yield))
 
     r2 = st.columns(4)
-    r2[0].metric("Market Cap",    fmt_big(info.get("marketCap")))
-    r2[1].metric("Revenue (TTM)", fmt_big(info.get("totalRevenue")))
-    r2[2].metric("EBITDA",        fmt_big(info.get("ebitda")))
-    r2[3].metric("Net Income",    fmt_big(info.get("netIncomeToCommon")))
+    r2[0].metric("Price / Book",   fmt_num(info.get("priceToBook")))
+    r2[1].metric("Beta",           fmt_num(info.get("beta")))
+    r2[2].metric("Market Cap",     fmt_big(info.get("marketCap")))
+    r2[3].metric("Dividend Yield", fmt_pct(info.get("dividendYield")))
 
     r3 = st.columns(4)
-    r3[0].metric("ROE",            fmt_pct(info.get("returnOnEquity")))
-    r3[1].metric("ROA",            fmt_pct(info.get("returnOnAssets")))
-    r3[2].metric("Profit Margin",  fmt_pct(info.get("profitMargins")))
-    r3[3].metric("Dividend Yield", fmt_pct(info.get("dividendYield")))
+    r3[0].metric("Gross Margin",     fmt_pct(info.get("grossMargins")))
+    r3[1].metric("Operating Margin", fmt_pct(info.get("operatingMargins")))
+    r3[2].metric("EBITDA Margin",    fmt_pct(info.get("ebitdaMargins")))
+    r3[3].metric("Profit Margin",    fmt_pct(info.get("profitMargins")))
 
     r4 = st.columns(4)
-    r4[0].metric("52W High",   fmt_num(info.get("fiftyTwoWeekHigh")))
-    r4[1].metric("52W Low",    fmt_num(info.get("fiftyTwoWeekLow")))
-    r4[2].metric("Avg Volume", fmt_big(info.get("averageVolume")))
-    r4[3].metric("Shares Out", fmt_big(info.get("sharesOutstanding")))
+    r4[0].metric("ROE",       fmt_pct(info.get("returnOnEquity")))
+    r4[1].metric("ROA",       fmt_pct(info.get("returnOnAssets")))
+    r4[2].metric("52W High",  fmt_num(info.get("fiftyTwoWeekHigh")))
+    r4[3].metric("52W Low",   fmt_num(info.get("fiftyTwoWeekLow")))
 
     desc = info.get("longBusinessSummary")
     if desc:
@@ -1094,142 +1213,72 @@ with tab_markets:
         st.markdown("".join(news_html), unsafe_allow_html=True)
 
 # =========================================================================
-# PORTFOLIO TAB
+# FINANCIALS TAB
 # =========================================================================
-with tab_portfolio:
-    # ---- Holdings table + summary ----
-    st.markdown('<div class="panel-title">Holdings</div>', unsafe_allow_html=True)
-
-    holdings_rows = []
-    for h in FUND_HOLDINGS:
-        hist = get_history(h["ticker"], period="5d")
-        info = get_info(h["ticker"])
+def _build_subsector_table(ticker_list):
+    """Build a quote DataFrame for a list of tickers."""
+    rows = []
+    for t in ticker_list:
+        hist = get_history(t, period="5d")
         if hist.empty:
             continue
-        price = float(hist["Close"].iloc[-1])
-        prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else float(hist["Open"].iloc[-1])
-        day_pct = (price - prev) / prev * 100
-        mv = price * h["shares"]
-        cost = h["cost_basis"] * h["shares"]
-        unreal = mv - cost
-        unreal_pct = (price / h["cost_basis"] - 1) * 100
-
-        holdings_rows.append({
-            "Ticker":       h["ticker"],
-            "Name":         info.get("shortName", h["ticker"]),
-            "Shares":       f"{h['shares']:,}",
-            "Last":         f"{price:,.2f}",
-            "Day %":        f"{day_pct:+.2f}%",
-            "Cost Basis":   f"{h['cost_basis']:,.2f}",
-            "Market Value": f"${mv:,.0f}",
-            "Unreal P&L":   f"${unreal:+,.0f}",
-            "Unreal %":     f"{unreal_pct:+.2f}%",
-            "_mv":          mv,
+        price = hist["Close"].iloc[-1]
+        prev = hist["Close"].iloc[-2] if len(hist) >= 2 else hist["Open"].iloc[-1]
+        pct = (price - prev) / prev * 100
+        info = get_info(t)
+        rows.append({
+            "Ticker":  t,
+            "Last":    f"{price:,.2f}",
+            "Chg%":    f"{pct:+.2f}%",
+            "Mkt Cap": fmt_big(info.get("marketCap")),
+            "P/E":     fmt_num(info.get("trailingPE")),
         })
+    return pd.DataFrame(rows)
 
-    total_mv = sum(r["_mv"] for r in holdings_rows)
-    for row in holdings_rows:
-        row["Weight"] = f"{(row['_mv'] / total_mv * 100):.2f}%" if total_mv else "—"
 
-    if holdings_rows:
-        holdings_df = pd.DataFrame(holdings_rows)[[
-            "Ticker", "Name", "Shares", "Last", "Day %",
-            "Cost Basis", "Market Value", "Unreal P&L", "Unreal %", "Weight",
-        ]]
-
-        holdings_styled = (
-            holdings_df.style
-            .set_properties(**{
-                "background-color": "#ffffff",
-                "color": "#111827",
-                "font-family": "JetBrains Mono, monospace",
-                "font-size": "13px",
-            })
-            .map(color_signed, subset=["Day %", "Unreal P&L", "Unreal %"])
-        )
-
-        c_hold, c_summary = st.columns([4, 1])
-        with c_hold:
-            st.dataframe(holdings_styled, width="stretch", hide_index=True)
-        with c_summary:
-            total_cost = sum(h["shares"] * h["cost_basis"] for h in FUND_HOLDINGS)
-            total_pnl = total_mv - total_cost
-            st.metric("Market Value", f"${total_mv:,.0f}")
-            st.metric(
-                "Unrealized P&L",
-                f"${total_pnl:+,.0f}",
-                delta=f"{(total_pnl/total_cost*100):+.2f}%" if total_cost else None,
-            )
-    else:
-        st.info("No holdings to display. Add trades to FUND_TRADES in the source file.")
-
-    # ---- Performance chart ----
+def _render_subsector(name, ticker_list):
+    """Render one subsector block: header, quote table."""
     st.markdown(
-        '<div class="kicker">Since Inception</div>'
-        '<div class="panel-title">Portfolio Performance</div>',
+        f'<div class="kicker">{len(ticker_list)} names</div>'
+        f'<div class="panel-title">{name}</div>',
         unsafe_allow_html=True,
     )
-    perf_df = compute_portfolio_history(FUND_TRADES)
-    if perf_df.empty or len(perf_df) < 2:
-        st.info(
-            "Not enough trading history yet to plot a performance curve. "
-            "Chart will populate once your holdings have at least two trading days of data."
-        )
-    else:
-        perf_fig = go.Figure()
-        # Cost basis reference (flat-ish line stepping up with each buy)
-        perf_fig.add_trace(go.Scatter(
-            x=perf_df["Date"], y=perf_df["Cost"],
-            mode="lines",
-            line=dict(color="#9ca3af", width=1.5, dash="dot"),
-            name="Cost Basis",
-        ))
-        # Market value
-        perf_fig.add_trace(go.Scatter(
-            x=perf_df["Date"], y=perf_df["Value"],
-            mode="lines", fill="tonexty",
-            line=dict(color="#2563eb", width=2.2),
-            fillcolor="rgba(37,99,235,0.10)",
-            name="Market Value",
-        ))
-        perf_fig.update_layout(
-            template="simple_white",
-            paper_bgcolor="#ffffff",
-            plot_bgcolor="#ffffff",
-            height=360,
-            margin=dict(l=10, r=10, t=10, b=10),
-            showlegend=True,
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
-                font=dict(family="Inter, sans-serif", size=11, color="#6b7280"),
-            ),
-            font=dict(family="Inter, sans-serif", color="#111827", size=11),
-            hovermode="x unified",
-        )
-        perf_fig.update_xaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
-                              linecolor="#e5e7eb", showline=True)
-        perf_fig.update_yaxes(gridcolor="#f3f4f6", zerolinecolor="#e5e7eb",
-                              linecolor="#e5e7eb", showline=True,
-                              tickformat="$,.0f")
-        st.plotly_chart(perf_fig, width="stretch")
-
-    # ---- Trade blotter ----
-    st.markdown('<div class="panel-title">Trade Blotter</div>', unsafe_allow_html=True)
-    trades_df = pd.DataFrame(FUND_TRADES)
-    if not trades_df.empty:
-        trades_df = trades_df.sort_values("date", ascending=False)
-        trades_df["price"] = trades_df["price"].map(lambda x: f"${x:,.2f}")
-        trades_df["shares"] = trades_df["shares"].map(lambda x: f"{x:,}")
-        trades_df.columns = [c.capitalize() for c in trades_df.columns]
-        trades_styled = trades_df.style.set_properties(**{
+    df = _build_subsector_table(ticker_list)
+    if df.empty:
+        st.warning(f"Could not load {name} data.")
+        return
+    styled = (
+        df.style
+        .set_properties(**{
             "background-color": "#ffffff",
             "color": "#111827",
             "font-family": "JetBrains Mono, monospace",
             "font-size": "13px",
         })
-        st.dataframe(trades_styled, width="stretch", hide_index=True)
-    else:
-        st.info("No trades logged yet.")
+        .map(color_signed, subset=["Chg%"])
+    )
+    st.dataframe(styled, width="stretch", hide_index=True)
+
+
+with tab_financials:
+    st.markdown(
+        '<div class="kicker">Large-Cap U.S. Financials</div>'
+        '<div class="panel-title">Sector Overview</div>',
+        unsafe_allow_html=True,
+    )
+
+    # 2x2 grid of subsectors
+    row1_left, row1_right = st.columns(2)
+    with row1_left:
+        _render_subsector("Banks", subsectors["Banks"])
+    with row1_right:
+        _render_subsector("Insurance", subsectors["Insurance"])
+
+    row2_left, row2_right = st.columns(2)
+    with row2_left:
+        _render_subsector("Asset Managers", subsectors["Asset Managers"])
+    with row2_right:
+        _render_subsector("Payments", subsectors["Payments"])
 
 
 # =========================================================================
@@ -1294,26 +1343,26 @@ with tab_industries:
     default_selection = [n for n in ["Technology", "Financials", "Energy", "Health Care"]
                          if n in all_names]
 
-    ctrl_left, ctrl_right = st.columns([3, 1])
-    with ctrl_left:
-        selected = st.multiselect(
-            "Select groups to compare",
-            all_names,
-            default=default_selection,
-            key="rel_perf_select",
-        )
-    with ctrl_right:
-        rel_period = st.select_slider(
-            "Lookback",
-            options=["1mo", "3mo", "6mo", "1y"],
-            value="3mo",
-            key="rel_perf_period",
-        )
+    selected = st.multiselect(
+        "Select groups to compare",
+        all_names,
+        default=default_selection,
+        key="rel_perf_select",
+    )
+
+    rel_period = st.segmented_control(
+        "Lookback",
+        options=PERIOD_OPTIONS,
+        default="3M",
+        label_visibility="collapsed",
+        key="rel_perf_period_sc",
+    )
+    if not rel_period:
+        rel_period = "3M"
 
     if not selected:
         st.info("Pick at least one group above to see relative performance.")
     else:
-        # Distinct colors — extended if lots selected
         palette = ["#2563eb", "#059669", "#dc2626", "#d97706",
                    "#7c3aed", "#db2777", "#0891b2", "#ca8a04",
                    "#4338ca", "#047857", "#b91c1c", "#a16207"]
@@ -1321,21 +1370,27 @@ with tab_industries:
 
         for i, name in enumerate(selected):
             ticker = all_groups[name]
-            rel_hist = get_history(ticker, period=rel_period)
+            rel_hist = get_chart_history(ticker, rel_period)
             if rel_hist.empty or len(rel_hist) < 2:
                 continue
             closes = rel_hist["Close"]
-            normalized = closes / float(closes.iloc[0]) * 100
+            start_px = float(closes.iloc[0])
+            end_px = float(closes.iloc[-1])
+            ret_pct = (end_px - start_px) / start_px * 100
+            normalized = closes / start_px * 100
+
+            sign = "+" if ret_pct >= 0 else ""
+            legend_name = f"{name}  {sign}{ret_pct:.2f}%"
+
             rel_fig.add_trace(go.Scatter(
                 x=normalized.index,
                 y=normalized.values,
                 mode="lines",
-                name=name,
+                name=legend_name,
                 line=dict(color=palette[i % len(palette)], width=2),
                 hovertemplate=f"<b>{name}</b><br>%{{x|%b %d, %Y}}<br>%{{y:.2f}}<extra></extra>",
             ))
 
-        # Reference line at 100
         rel_fig.add_hline(
             y=100, line_dash="dash", line_color="#9ca3af", line_width=1,
             annotation_text="Start", annotation_position="right",
@@ -1351,7 +1406,7 @@ with tab_industries:
             showlegend=True,
             legend=dict(
                 orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0,
-                font=dict(family="Inter, sans-serif", size=11, color="#6b7280"),
+                font=dict(family="JetBrains Mono, monospace", size=12, color="#111827"),
             ),
             font=dict(family="Inter, sans-serif", color="#111827", size=11),
             hovermode="x unified",
@@ -1363,3 +1418,89 @@ with tab_industries:
                              tickformat=".1f")
 
         st.plotly_chart(rel_fig, width="stretch")
+
+
+# =========================================================================
+# CALENDAR TAB
+# =========================================================================
+with tab_calendar:
+    st.markdown(
+        '<div class="kicker">Key Macro Events Ahead</div>'
+        '<div class="panel-title">Economic Calendar</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Lookahead selector
+    days_ahead = st.segmented_control(
+        "Lookahead",
+        options=[14, 30, 60, 90],
+        format_func=lambda d: f"{d} days",
+        default=30,
+        label_visibility="collapsed",
+        key="cal_lookahead",
+    )
+    if not days_ahead:
+        days_ahead = 30
+
+    events = get_upcoming_events(days_ahead=days_ahead)
+
+    if not events:
+        st.info(f"No upcoming events in the next {days_ahead} days.")
+    else:
+        today_d = datetime.now().date()
+        rows = []
+        for e in events:
+            delta = (e["_date"] - today_d).days
+            if delta == 0:
+                when = "Today"
+            elif delta == 1:
+                when = "Tomorrow"
+            elif delta < 7:
+                when = f"In {delta} days"
+            elif delta < 14:
+                when = f"Next week"
+            else:
+                when = f"In {delta} days"
+
+            rows.append({
+                "Date":       e["_date"].strftime("%a, %b %d"),
+                "Event":      e["event"],
+                "Category":   e["category"],
+                "Importance": e["importance"],
+                "When":       when,
+            })
+
+        df = pd.DataFrame(rows)
+
+        def _importance_color(val):
+            if val == "High":
+                return "color: #dc2626; font-weight: 600;"
+            if val == "Medium":
+                return "color: #d97706; font-weight: 500;"
+            return "color: #6b7280;"
+
+        styled = (
+            df.style
+            .set_properties(**{
+                "background-color": "#ffffff",
+                "color": "#111827",
+                "font-family": "Inter, sans-serif",
+                "font-size": "13px",
+            })
+            .map(_importance_color, subset=["Importance"])
+        )
+        st.dataframe(styled, width="stretch", hide_index=True)
+
+    # Methodology / disclaimer
+    st.markdown(
+        '<div style="margin-top:20px; padding:14px 18px; background:#f9fafb; '
+        'border-left:3px solid #6b7280; font-family:Inter,sans-serif; '
+        'font-size:12px; color:#6b7280; line-height:1.6;">'
+        '<strong style="color:#111827;">Methodology.</strong> FOMC meeting dates come from '
+        'the Federal Reserve\'s published schedule. Nonfarm Payrolls are computed as the '
+        'first Friday of each month (BLS standard). CPI, PPI, GDP, and Retail Sales dates '
+        'follow typical monthly patterns but specific release dates are set by the BLS / BEA '
+        'each month — cross-reference with official sources for day-of trading decisions.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
