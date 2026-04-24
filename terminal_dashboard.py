@@ -703,7 +703,7 @@ def generate_market_summary():
 # =========================
 # CHART PERIODS
 # =========================
-PERIOD_OPTIONS = ["1D", "5D", "1M", "6M", "YTD", "1Y", "3Y", "5Y", "All"]
+PERIOD_OPTIONS = ["1D", "5D", "1M", "3M", "6M", "YTD", "1Y", "3Y", "5Y", "All"]
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -724,7 +724,8 @@ def get_chart_history(ticker, period_label):
             return tk.history(start=start, interval="1d")
         if period_label == "All":
             return tk.history(period="max", interval="1d")
-        mapping = {"1M": "1mo", "6M": "6mo", "1Y": "1y", "3Y": "3y", "5Y": "5y"}
+        mapping = {"1M": "1mo", "3M": "3mo", "6M": "6mo",
+                   "1Y": "1y", "3Y": "3y", "5Y": "5y"}
         return tk.history(period=mapping.get(period_label, "6mo"), interval="1d")
     except Exception:
         return pd.DataFrame()
@@ -1048,18 +1049,29 @@ with tab_markets:
     # Fetch history for the selected period
     hist = get_chart_history(chart_ticker, period_label)
 
+    # For the Current Price display, always use the latest intraday print
+    # (1-minute bar today) so the price doesn't appear to change when you
+    # switch between period views during market hours. Period charts may use
+    # daily bars, which would show yesterday's close.
+    live_hist = get_chart_history(chart_ticker, "1D")
+    if not live_hist.empty:
+        current_price = float(live_hist["Close"].iloc[-1])
+    elif not hist.empty:
+        current_price = float(hist["Close"].iloc[-1])
+    else:
+        current_price = None
+
     # Header row: ticker info on the left, period return on the right
     h_left, h_right = st.columns([3, 1])
     with h_left:
         price_line_html = ""
-        if not hist.empty:
-            current = float(hist["Close"].iloc[-1])
+        if current_price is not None:
             prefix = "" if chart_ticker.startswith("^") else "$"
             price_line_html = (
                 f'<div style="font-family:\'JetBrains Mono\',monospace; '
                 f'font-size:32px; font-weight:700; color:#111827; '
                 f'letter-spacing:-0.02em; margin-top:6px;">'
-                f'{prefix}{current:,.2f}</div>'
+                f'{prefix}{current_price:,.2f}</div>'
             )
         st.markdown(
             f'<div class="kicker">{period_label} · {chart_type}</div>'
@@ -1070,7 +1082,9 @@ with tab_markets:
     with h_right:
         if not hist.empty and len(hist) >= 2:
             start_px = float(hist["Close"].iloc[0])
-            end_px = float(hist["Close"].iloc[-1])
+            # Use live current_price for the period return so it matches the
+            # displayed Current Price exactly
+            end_px = current_price if current_price is not None else float(hist["Close"].iloc[-1])
             ret_pct = (end_px - start_px) / start_px * 100
             ret_abs = end_px - start_px
             sign = "+" if ret_pct >= 0 else ""
