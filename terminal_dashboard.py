@@ -657,111 +657,125 @@ def format_and_style_perf(df):
     )
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def generate_market_summary():
     """Compose a one-paragraph market summary from live data.
 
-    NOT an LLM-generated summary — just templated prose derived from price moves
-    across indices, sectors, rates, and commodities. Describes WHAT moved,
-    not WHY. Refreshes every 10 minutes.
+    Templated prose derived from price moves across indices, sectors, rates,
+    and commodities. Describes WHAT moved, not WHY. Refreshes every 5 minutes.
+    Returns a friendly fallback if data is unavailable so the panel always shows.
     """
-    def _move(ticker):
-        hist = get_history(ticker, period="5d")
-        if hist.empty or len(hist) < 2:
-            return None
-        last = float(hist["Close"].iloc[-1])
-        prev = float(hist["Close"].iloc[-2])
-        if prev == 0:
-            return None
-        return {"price": last, "pct": (last - prev) / prev * 100,
-                "chg": last - prev}
+    try:
+        def _move(ticker):
+            hist = get_history(ticker, period="5d")
+            if hist.empty or len(hist) < 2:
+                return None
+            last = float(hist["Close"].iloc[-1])
+            prev = float(hist["Close"].iloc[-2])
+            if prev == 0:
+                return None
+            return {"price": last, "pct": (last - prev) / prev * 100,
+                    "chg": last - prev}
 
-    sp = _move("^GSPC")
-    if not sp:
-        return None
+        sp = _move("^GSPC")
+        nasdaq = _move("^IXIC")
+        dow = _move("^DJI")
+        rty = _move("^RUT")
+        vix = _move("^VIX")
+        ten_yr = _move("^TNX")
+        gold = _move("GLD")
+        oil = _move("USO")
 
-    nasdaq = _move("^IXIC")
-    dow = _move("^DJI")
-    rty = _move("^RUT")
-    vix = _move("^VIX")
-    ten_yr = _move("^TNX")
-    gold = _move("GLD")
-    oil = _move("USO")
+        # If we don't have any of the major benchmarks, give a fallback
+        if not any([sp, nasdaq, dow]):
+            return ("Market data is loading. The summary will populate once the "
+                    "feed is available — usually within 30 seconds.")
 
-    # Sector rotation (1-day)
-    sector_moves = []
-    for name, ticker in SECTOR_ETFS.items():
-        m = _move(ticker)
-        if m:
-            sector_moves.append((name, m["pct"]))
-    sector_moves.sort(key=lambda x: x[1], reverse=True)
+        # Sector rotation (1-day) — only attempt if we have core data
+        sector_moves = []
+        for name, ticker in SECTOR_ETFS.items():
+            m = _move(ticker)
+            if m:
+                sector_moves.append((name, m["pct"]))
+        sector_moves.sort(key=lambda x: x[1], reverse=True)
 
-    # S&P direction verb — scaled to magnitude for natural prose
-    def _sp_verb(pct):
-        if pct >= 1.5:  return "surged"
-        if pct >= 0.5:  return "climbed"
-        if pct >= 0.1:  return "edged higher"
-        if pct > -0.1:  return "finished little changed"
-        if pct > -0.5:  return "slipped"
-        if pct > -1.5:  return "declined"
-        return "tumbled"
+        # S&P direction verb — scaled to magnitude
+        def _sp_verb(pct):
+            if pct >= 1.5:  return "surged"
+            if pct >= 0.5:  return "climbed"
+            if pct >= 0.1:  return "edged higher"
+            if pct > -0.1:  return "finished little changed"
+            if pct > -0.5:  return "slipped"
+            if pct > -1.5:  return "declined"
+            return "tumbled"
 
-    verb = _sp_verb(sp["pct"])
-    if abs(sp["pct"]) < 0.1:
-        lead = (f"The S&P 500 {verb} at {sp['price']:,.0f}, "
-                f"{'up' if sp['pct'] >= 0 else 'down'} {abs(sp['pct']):.2f}%")
-    else:
-        lead = f"The S&P 500 {verb} {abs(sp['pct']):.2f}% to {sp['price']:,.0f}"
+        # Lead sentence — prefer S&P, fall back to Nasdaq, then Dow
+        if sp:
+            verb = _sp_verb(sp["pct"])
+            if abs(sp["pct"]) < 0.1:
+                lead = (f"The S&P 500 {verb} at {sp['price']:,.0f}, "
+                        f"{'up' if sp['pct'] >= 0 else 'down'} {abs(sp['pct']):.2f}%")
+            else:
+                lead = f"The S&P 500 {verb} {abs(sp['pct']):.2f}% to {sp['price']:,.0f}"
+        elif nasdaq:
+            verb = _sp_verb(nasdaq["pct"])
+            lead = f"The Nasdaq {verb} {abs(nasdaq['pct']):.2f}% to {nasdaq['price']:,.0f}"
+        else:
+            verb = _sp_verb(dow["pct"])
+            lead = f"The Dow {verb} {abs(dow['pct']):.2f}% to {dow['price']:,.0f}"
 
-    # Sector leadership
-    sector_sentence = ""
-    if sector_moves:
-        leaders = [s for s in sector_moves[:2] if s[1] > 0]
-        laggards = [s for s in sector_moves[-2:] if s[1] < 0]
-        if leaders and laggards:
-            L = " and ".join(n for n, _ in leaders)
-            G = " and ".join(n for n, _ in laggards)
-            sector_sentence = f"{L} led the gainers while {G} lagged."
-        elif leaders:
-            L = " and ".join(n for n, _ in leaders)
-            sector_sentence = f"{L} led broad sector gains."
-        elif laggards:
-            G = " and ".join(n for n, _ in laggards)
-            sector_sentence = f"{G} lagged across a down session."
+        # Sector leadership
+        sector_sentence = ""
+        if sector_moves:
+            leaders = [s for s in sector_moves[:2] if s[1] > 0]
+            laggards = [s for s in sector_moves[-2:] if s[1] < 0]
+            if leaders and laggards:
+                L = " and ".join(n for n, _ in leaders)
+                G = " and ".join(n for n, _ in laggards)
+                sector_sentence = f"{L} led the gainers while {G} lagged."
+            elif leaders:
+                L = " and ".join(n for n, _ in leaders)
+                sector_sentence = f"{L} led broad sector gains."
+            elif laggards:
+                G = " and ".join(n for n, _ in laggards)
+                sector_sentence = f"{G} lagged across a down session."
 
-    # Other benchmarks
-    other_parts = []
-    if nasdaq:
-        v = "added" if nasdaq["pct"] >= 0 else "lost"
-        other_parts.append(f"the Nasdaq {v} {abs(nasdaq['pct']):.2f}%")
-    if dow:
-        v = "gained" if dow["pct"] >= 0 else "shed"
-        other_parts.append(f"the Dow {v} {abs(dow['chg']):.0f} points")
-    if rty:
-        v = "rose" if rty["pct"] >= 0 else "fell"
-        other_parts.append(f"small caps {v} {abs(rty['pct']):.2f}%")
-    other_sentence = (f"Among major benchmarks, {'; '.join(other_parts)}."
-                      if other_parts else "")
+        # Other benchmarks (skip the one used for the lead)
+        other_parts = []
+        if nasdaq and sp:
+            v = "added" if nasdaq["pct"] >= 0 else "lost"
+            other_parts.append(f"the Nasdaq {v} {abs(nasdaq['pct']):.2f}%")
+        if dow and (sp or nasdaq):
+            v = "gained" if dow["pct"] >= 0 else "shed"
+            other_parts.append(f"the Dow {v} {abs(dow['chg']):.0f} points")
+        if rty:
+            v = "rose" if rty["pct"] >= 0 else "fell"
+            other_parts.append(f"small caps {v} {abs(rty['pct']):.2f}%")
+        other_sentence = (f"Among major benchmarks, {'; '.join(other_parts)}."
+                          if other_parts else "")
 
-    # Rates / vol / commodities — only mention notable commodity moves
-    macro_parts = []
-    if ten_yr:
-        v = "rose" if ten_yr["pct"] >= 0 else "eased"
-        macro_parts.append(f"the 10-year Treasury yield {v} to {ten_yr['price']:.2f}%")
-    if vix:
-        v = "climbed" if vix["pct"] >= 0 else "eased"
-        macro_parts.append(f"the VIX {v} to {vix['price']:.2f}")
-    if gold and abs(gold["pct"]) >= 0.5:
-        d = "higher" if gold["pct"] >= 0 else "lower"
-        macro_parts.append(f"gold moved {d} by {abs(gold['pct']):.2f}%")
-    if oil and abs(oil["pct"]) >= 1.0:
-        d = "higher" if oil["pct"] >= 0 else "lower"
-        macro_parts.append(f"crude oil traded {d} by {abs(oil['pct']):.2f}%")
-    macro_sentence = (f"Elsewhere, {'; '.join(macro_parts)}."
-                      if macro_parts else "")
+        # Rates / vol / commodities
+        macro_parts = []
+        if ten_yr:
+            v = "rose" if ten_yr["pct"] >= 0 else "eased"
+            macro_parts.append(f"the 10-year Treasury yield {v} to {ten_yr['price']:.2f}%")
+        if vix:
+            v = "climbed" if vix["pct"] >= 0 else "eased"
+            macro_parts.append(f"the VIX {v} to {vix['price']:.2f}")
+        if gold and abs(gold["pct"]) >= 0.5:
+            d = "higher" if gold["pct"] >= 0 else "lower"
+            macro_parts.append(f"gold moved {d} by {abs(gold['pct']):.2f}%")
+        if oil and abs(oil["pct"]) >= 1.0:
+            d = "higher" if oil["pct"] >= 0 else "lower"
+            macro_parts.append(f"crude oil traded {d} by {abs(oil['pct']):.2f}%")
+        macro_sentence = (f"Elsewhere, {'; '.join(macro_parts)}."
+                          if macro_parts else "")
 
-    parts = [lead + ".", sector_sentence, other_sentence, macro_sentence]
-    return " ".join(p for p in parts if p)
+        parts = [lead + ".", sector_sentence, other_sentence, macro_sentence]
+        return " ".join(p for p in parts if p)
+
+    except Exception as e:
+        return f"Summary unavailable right now ({type(e).__name__}). Refresh in a minute."
 
 
 # =========================
@@ -1049,6 +1063,64 @@ with tab_markets:
             """,
             unsafe_allow_html=True,
         )
+
+    # ---- Sector Heatmap ----
+    st.markdown('<div class="panel-title">Sector Heatmap</div>', unsafe_allow_html=True)
+
+    def _heatmap_color(pct):
+        """Return (bg_color, text_color) for a given % change.
+
+        Color intensity scales with magnitude — small moves are light, big
+        moves are saturated. Capped at ±2% so we don't end up with
+        unreadable contrast on extreme days.
+        """
+        if pct is None:
+            return ("#f3f4f6", "#9ca3af")
+        # Normalize magnitude to 0..1, capped at 2%
+        intensity = min(abs(pct) / 2.0, 1.0)
+        if pct >= 0:
+            # Light green (#d1fae5) -> deep green (#047857)
+            r = int(209 + (4 - 209) * intensity)
+            g = int(250 + (120 - 250) * intensity)
+            b = int(229 + (87 - 229) * intensity)
+        else:
+            # Light red (#fee2e2) -> deep red (#991b1b)
+            r = int(254 + (153 - 254) * intensity)
+            g = int(226 + (27 - 226) * intensity)
+            b = int(226 + (27 - 226) * intensity)
+        bg = f"rgb({r},{g},{b})"
+        # Use white text once intensity is dark enough
+        text = "#ffffff" if intensity > 0.45 else "#111827"
+        return (bg, text)
+
+    sector_tiles_html = ['<div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:24px;">']
+    for name, ticker in SECTOR_ETFS.items():
+        hist = get_history(ticker, period="5d")
+        if hist.empty or len(hist) < 2:
+            pct = None
+            pct_text = "—"
+        else:
+            last = float(hist["Close"].iloc[-1])
+            prev = float(hist["Close"].iloc[-2])
+            pct = (last - prev) / prev * 100 if prev else None
+            pct_text = f"{pct:+.2f}%" if pct is not None else "—"
+
+        bg, text_color = _heatmap_color(pct)
+        sector_tiles_html.append(
+            f'<div style="flex:1 1 calc(9.09% - 8px); min-width:115px; '
+            f'background:{bg}; color:{text_color}; padding:12px 14px; '
+            f'border-radius:2px;">'
+            f'<div style="font-family:Inter,sans-serif; font-size:10px; '
+            f'font-weight:500; text-transform:uppercase; letter-spacing:0.06em; '
+            f'opacity:0.85; margin-bottom:6px;">{name}</div>'
+            f'<div style="font-family:\'JetBrains Mono\',monospace; '
+            f'font-size:16px; font-weight:600;">{pct_text}</div>'
+            f'<div style="font-family:Inter,sans-serif; font-size:10px; '
+            f'opacity:0.7; margin-top:2px;">{ticker}</div>'
+            f'</div>'
+        )
+    sector_tiles_html.append('</div>')
+    st.markdown("".join(sector_tiles_html), unsafe_allow_html=True)
 
     # ---- Global Indices ----
     st.markdown('<div class="panel-title">Markets</div>', unsafe_allow_html=True)
