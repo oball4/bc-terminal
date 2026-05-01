@@ -3,7 +3,7 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # =========================
 # PAGE CONFIG
@@ -441,10 +441,48 @@ def get_history(ticker, period="1d", interval="1d"):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_info(ticker):
+    """Pull a ticker's full info dict from yfinance with retry + fast_info fallback.
+
+    yfinance's .info is rate-limited and sometimes returns {} silently. We
+    retry once and supplement with .fast_info which uses a different endpoint
+    and is more reliable for basics (market cap, 52w hi/lo, last price)."""
+    info = {}
     try:
-        return yf.Ticker(ticker, session=get_session()).info or {}
+        tk = yf.Ticker(ticker, session=get_session())
+        info = tk.info or {}
     except Exception:
-        return {}
+        info = {}
+
+    # If .info came back empty or sparse, try fast_info to fill in basics
+    try:
+        tk = yf.Ticker(ticker, session=get_session())
+        fast = tk.fast_info
+        # fast_info exposes attributes like marketCap, lastPrice,
+        # yearHigh, yearLow, currency, exchange, etc.
+        # Only fill in what's missing in the main .info dict.
+        fast_map = {
+            "marketCap":         "marketCap",
+            "lastPrice":         "regularMarketPrice",
+            "previousClose":     "previousClose",
+            "yearHigh":          "fiftyTwoWeekHigh",
+            "yearLow":           "fiftyTwoWeekLow",
+            "tenDayAverageVolume": "averageVolume10days",
+            "shares":            "sharesOutstanding",
+            "currency":          "currency",
+            "exchange":          "exchange",
+        }
+        for fast_key, info_key in fast_map.items():
+            if not info.get(info_key):
+                try:
+                    val = getattr(fast, fast_key, None)
+                    if val is not None:
+                        info[info_key] = val
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return info
 
 
 
@@ -784,6 +822,22 @@ def generate_market_summary():
 PERIOD_OPTIONS = ["1D", "5D", "1M", "3M", "6M", "YTD", "1Y", "3Y", "5Y", "All"]
 
 
+# zoneinfo is in stdlib since Python 3.9 — no extra package needed
+try:
+    from zoneinfo import ZoneInfo
+    _MT_ZONE = ZoneInfo("America/Denver")  # handles MST/MDT switch automatically
+except ImportError:
+    _MT_ZONE = None
+
+
+def now_mountain():
+    """Return current time in Mountain Time (handles MST/MDT automatically)."""
+    if _MT_ZONE is not None:
+        return datetime.now(timezone.utc).astimezone(_MT_ZONE)
+    # Fallback if zoneinfo unavailable: assume MDT (UTC-6)
+    return datetime.now(timezone.utc) - timedelta(hours=6)
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_chart_history(ticker, period_label):
     """Fetch chart history for a user-friendly period label.
@@ -807,6 +861,211 @@ def get_chart_history(ticker, period_label):
         return tk.history(period=mapping.get(period_label, "6mo"), interval="1d")
     except Exception:
         return pd.DataFrame()
+
+
+# =========================
+# FRED ECONOMIC DATA
+# =========================
+# FRED (St. Louis Fed) provides free CSV data for thousands of economic series.
+# We use the public CSV endpoint which doesn't require an API key for basic use.
+# Format: https://fred.stlouisfed.org/graph/fredgraph.csv?id=SERIES_ID
+#
+# Series IDs we use:
+#   GDPC1     — Real GDP, quarterly, Bil. of Chained 2017 Dollars
+#   A191RL1Q225SBEA — Real GDP, quarterly % change at annual rate
+#   UNRATE    — Unemployment rate, monthly
+#   CPIAUCSL  — CPI All Urban Consumers, monthly
+#   FEDFUNDS  — Federal Funds Effective Rate, monthly
+#   DFEDTARU  — Fed Funds Target Range Upper Limit
+#   DFEDTARL  — Fed Funds Target Range Lower Limit
+#   PAYEMS    — Total Nonfarm Payrolls, monthly (level)
+#   T10Y2Y    — 10Y - 2Y Treasury Spread (recession indicator)
+#   ICSA      — Initial Jobless Claims, weekly
+ECONOMIC_SERIES = {
+    "real_gdp_yoy":   ("A191RL1Q225SBEA", "Real GDP Growth (annualized %, latest Q)"),
+    "unemployment":   ("UNRATE",          "Unemployment Rate"),
+    "cpi":            ("CPIAUCSL",        "CPI Year-over-Year"),
+    "fed_funds_high": ("DFEDTARU",        "Fed Funds Target (Upper)"),
+    "fed_funds_low":  ("DFEDTARL",        "Fed Funds Target (Lower)"),
+    "nonfarm":        ("PAYEMS",          "Nonfarm Payrolls (m/m change, k)"),
+    "yield_curve":    ("T10Y2Y",          "10Y-2Y Treasury Spread"),
+    "claims":         ("ICSA",            "Initial Jobless Claims"),
+}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_fred_series(series_id):
+    """Fetch a FRED time series via the public CSV endpoint.
+
+    Returns a pandas Series indexed by date, or empty Series on failure.
+    No API key required for the public CSV endpoint.
+    """
+    try:
+        url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+        df = pd.read_csv(url)
+        # FRED CSVs have format: observation_date, SERIES_ID
+        date_col = df.columns[0]
+        val_col = df.columns[1]
+        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
+        df[val_col] = pd.to_numeric(df[val_col], errors="coerce")
+        df = df.dropna()
+        return df.set_index(date_col)[val_col]
+    except Exception:
+        return pd.Series(dtype=float)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_economic_dashboard_data():
+    """Fetch all economic indicators and compute derived values.
+
+    Returns a dict of {key: {value, change, date, label}} suitable for
+    displaying as metric cards. All returns are dollar/percent units —
+    the UI handles formatting.
+    """
+    out = {}
+
+    # Real GDP growth (already a quarterly % at annual rate)
+    gdp = fetch_fred_series("A191RL1Q225SBEA")
+    if not gdp.empty:
+        latest = float(gdp.iloc[-1])
+        prev = float(gdp.iloc[-2]) if len(gdp) > 1 else None
+        out["gdp"] = {
+            "label": "Real GDP Growth",
+            "value": f"{latest:+.1f}%",
+            "delta": f"{latest - prev:+.1f} vs prior" if prev is not None else None,
+            "date": gdp.index[-1].strftime("%b %Y") + " (Q)",
+            "raw": latest,
+        }
+
+    # Unemployment rate
+    unemp = fetch_fred_series("UNRATE")
+    if not unemp.empty:
+        latest = float(unemp.iloc[-1])
+        prev = float(unemp.iloc[-2]) if len(unemp) > 1 else None
+        out["unemp"] = {
+            "label": "Unemployment Rate",
+            "value": f"{latest:.1f}%",
+            "delta": f"{latest - prev:+.1f} vs prior" if prev is not None else None,
+            "date": unemp.index[-1].strftime("%b %Y"),
+            "raw": latest,
+        }
+
+    # CPI year-over-year inflation
+    cpi = fetch_fred_series("CPIAUCSL")
+    if not cpi.empty and len(cpi) >= 13:
+        latest = float(cpi.iloc[-1])
+        year_ago = float(cpi.iloc[-13])
+        prev_yoy = ((float(cpi.iloc[-2]) - float(cpi.iloc[-14])) / float(cpi.iloc[-14]) * 100
+                    if len(cpi) >= 14 else None)
+        yoy = (latest - year_ago) / year_ago * 100
+        out["cpi"] = {
+            "label": "CPI Inflation (Y/Y)",
+            "value": f"{yoy:.1f}%",
+            "delta": f"{yoy - prev_yoy:+.1f} vs prior" if prev_yoy is not None else None,
+            "date": cpi.index[-1].strftime("%b %Y"),
+            "raw": yoy,
+        }
+
+    # Fed Funds Target Range
+    fed_high = fetch_fred_series("DFEDTARU")
+    fed_low = fetch_fred_series("DFEDTARL")
+    if not fed_high.empty and not fed_low.empty:
+        hi = float(fed_high.iloc[-1])
+        lo = float(fed_low.iloc[-1])
+        out["fed"] = {
+            "label": "Fed Funds Target",
+            "value": f"{lo:.2f}–{hi:.2f}%",
+            "delta": None,
+            "date": fed_high.index[-1].strftime("%b %d, %Y"),
+            "raw": hi,
+        }
+
+    # Nonfarm Payrolls — month-over-month change in thousands
+    nfp = fetch_fred_series("PAYEMS")
+    if not nfp.empty and len(nfp) >= 2:
+        change = float(nfp.iloc[-1] - nfp.iloc[-2])  # already in thousands
+        prev_change = float(nfp.iloc[-2] - nfp.iloc[-3]) if len(nfp) >= 3 else None
+        out["nfp"] = {
+            "label": "Nonfarm Payrolls",
+            "value": f"{change:+,.0f}k",
+            "delta": (f"{change - prev_change:+,.0f}k vs prior"
+                      if prev_change is not None else None),
+            "date": nfp.index[-1].strftime("%b %Y"),
+            "raw": change,
+        }
+
+    # 10Y - 2Y yield curve spread (negative = inverted = recession warning)
+    yc = fetch_fred_series("T10Y2Y")
+    if not yc.empty:
+        latest = float(yc.iloc[-1])
+        out["yc"] = {
+            "label": "10Y - 2Y Treasury Spread",
+            "value": f"{latest:+.2f}%",
+            "delta": "Inverted" if latest < 0 else "Normal",
+            "date": yc.index[-1].strftime("%b %d, %Y"),
+            "raw": latest,
+        }
+
+    # Initial jobless claims (weekly)
+    claims = fetch_fred_series("ICSA")
+    if not claims.empty and len(claims) >= 2:
+        latest = float(claims.iloc[-1])
+        prev = float(claims.iloc[-2])
+        out["claims"] = {
+            "label": "Initial Jobless Claims",
+            "value": f"{latest:,.0f}",
+            "delta": f"{latest - prev:+,.0f} vs prior",
+            "date": claims.index[-1].strftime("%b %d, %Y"),
+            "raw": latest,
+        }
+
+    return out
+
+
+def generate_macro_summary(econ):
+    """Compose a one-paragraph summary of the macro environment from econ data."""
+    if not econ:
+        return "Economic data is loading. Refresh in a moment."
+
+    parts = []
+
+    # Lead with growth and inflation framing
+    if "gdp" in econ:
+        gdp_v = econ["gdp"]["raw"]
+        gdp_word = ("expanded at" if gdp_v > 0 else "contracted at")
+        parts.append(f"The U.S. economy {gdp_word} a {abs(gdp_v):.1f}% annualized "
+                     f"pace in the most recent quarter.")
+
+    if "cpi" in econ and "fed" in econ:
+        cpi_v = econ["cpi"]["raw"]
+        fed_v = econ["fed"]["raw"]
+        parts.append(f"Headline CPI is running at {cpi_v:.1f}% year-over-year, with "
+                     f"the Fed Funds target range currently at {econ['fed']['value']}.")
+    elif "cpi" in econ:
+        parts.append(f"Headline CPI is running at {econ['cpi']['raw']:.1f}% year-over-year.")
+
+    if "unemp" in econ:
+        unemp_v = econ["unemp"]["raw"]
+        u_word = ("low" if unemp_v < 4 else "moderate" if unemp_v < 5
+                  else "elevated" if unemp_v < 6 else "high")
+        parts.append(f"The unemployment rate stands at {unemp_v:.1f}% — historically {u_word}.")
+
+    if "nfp" in econ:
+        nfp_v = econ["nfp"]["raw"]
+        nfp_word = ("strong" if nfp_v > 200 else "moderate" if nfp_v > 100
+                    else "weak" if nfp_v > 0 else "negative")
+        parts.append(f"The most recent jobs report showed {nfp_v:+,.0f}k payrolls added — "
+                     f"a {nfp_word} reading.")
+
+    if "yc" in econ:
+        yc_v = econ["yc"]["raw"]
+        if yc_v < 0:
+            parts.append(f"The 10Y–2Y Treasury spread is inverted at {yc_v:+.2f}%, a "
+                         f"historically reliable recession warning signal.")
+        else:
+            parts.append(f"The 10Y–2Y Treasury spread is positive at {yc_v:+.2f}%.")
+
+    return " ".join(parts)
 
 
 # =========================
@@ -918,7 +1177,7 @@ def get_upcoming_events(days_ahead=60):
 # =========================
 # TOP BANNER
 # =========================
-today = datetime.now()
+today = now_mountain()
 st.markdown(
     f"""
     <div class="banner">
@@ -929,7 +1188,7 @@ st.markdown(
         </div>
         <div class="meta">
             <div class="date">{today.strftime('%A, %B %d, %Y')}</div>
-            <div>{today.strftime('%H:%M:%S')} · Market Data</div>
+            <div>{today.strftime('%I:%M:%S %p')} {today.strftime('%Z')} · Market Data</div>
         </div>
     </div>
     """,
@@ -1034,7 +1293,7 @@ for t in list(st.session_state.watchlist):
 # TABS
 # =========================
 tab_markets, tab_comparison, tab_industries, tab_calendar = st.tabs(
-    ["Markets", "Comparison", "Industries", "Calendar"]
+    ["Markets", "Comparison", "Industries", "Economic Data"]
 )
 
 # =========================================================================
@@ -1044,7 +1303,7 @@ with tab_markets:
     # ---- Daily Market Summary ----
     summary = generate_market_summary()
     if summary:
-        ts = datetime.now().strftime("%b %d, %Y · %I:%M %p")
+        ts = now_mountain().strftime("%b %d, %Y · %I:%M %p %Z")
         st.markdown(
             f"""
             <div style="border-left: 3px solid #2563eb; padding: 16px 22px;
@@ -1298,40 +1557,85 @@ with tab_markets:
         f'<div class="panel-title">{chart_ticker}</div>',
         unsafe_allow_html=True,
     )
-    info = get_info(chart_ticker)
 
-    # Earnings yield = 1 / P/E (decimal form, fmt_pct will show as percentage)
-    te_pe = info.get("trailingPE")
-    earnings_yield = (1 / te_pe) if te_pe and te_pe != 0 else None
+    # Indices (^GSPC, ^IXIC, etc.) and yields (^TNX) don't have company-level
+    # fundamentals. Suggest the equivalent ETF instead so the user can see
+    # weighted-average ratios via the index-tracking ETF.
+    INDEX_TO_ETF = {
+        "^GSPC": "SPY", "^IXIC": "QQQ", "^DJI": "DIA",
+        "^RUT": "IWM", "^VIX": None, "^TNX": None,
+    }
 
-    r1 = st.columns(4)
-    r1[0].metric("P/E (TTM)",      fmt_num(info.get("trailingPE")))
-    r1[1].metric("Forward P/E",    fmt_num(info.get("forwardPE")))
-    r1[2].metric("EPS (TTM)",      fmt_num(info.get("trailingEps")))
-    r1[3].metric("Earnings Yield", fmt_pct(earnings_yield))
+    if chart_ticker.startswith("^"):
+        suggested_etf = INDEX_TO_ETF.get(chart_ticker)
+        if suggested_etf:
+            note = (f"<strong>{chart_ticker}</strong> is an index — it doesn't have "
+                    f"company-level fundamentals like P/E or margins. For a weighted "
+                    f"snapshot of the underlying basket, try <strong>{suggested_etf}</strong> "
+                    f"in the ticker box above.")
+        else:
+            note = (f"<strong>{chart_ticker}</strong> is an index or yield benchmark — "
+                    f"it doesn't have company-level fundamentals.")
+        st.markdown(
+            f'<div style="padding:14px 18px; background:#f9fafb; '
+            f'border-left:3px solid #6b7280; font-family:Inter,sans-serif; '
+            f'font-size:13px; color:#374151; line-height:1.5;">{note}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        info = get_info(chart_ticker)
 
-    r2 = st.columns(4)
-    r2[0].metric("Price / Book",   fmt_num(info.get("priceToBook")))
-    r2[1].metric("Beta",           fmt_num(info.get("beta")))
-    r2[2].metric("Market Cap",     fmt_big(info.get("marketCap")))
-    r2[3].metric("Dividend Yield", fmt_pct(info.get("dividendYield")))
+        # Earnings yield = 1 / P/E (decimal form, fmt_pct will show as percentage)
+        te_pe = info.get("trailingPE")
+        earnings_yield = (1 / te_pe) if te_pe and te_pe != 0 else None
 
-    r3 = st.columns(4)
-    r3[0].metric("Gross Margin",     fmt_pct(info.get("grossMargins")))
-    r3[1].metric("Operating Margin", fmt_pct(info.get("operatingMargins")))
-    r3[2].metric("EBITDA Margin",    fmt_pct(info.get("ebitdaMargins")))
-    r3[3].metric("Profit Margin",    fmt_pct(info.get("profitMargins")))
+        # Detect if we got essentially no data (typical for indices, ETFs without
+        # company info, or rate-limited responses)
+        meaningful_keys = ["trailingPE", "marketCap", "totalRevenue", "trailingEps",
+                           "fiftyTwoWeekHigh", "profitMargins"]
+        has_data = any(info.get(k) is not None for k in meaningful_keys)
 
-    r4 = st.columns(4)
-    r4[0].metric("ROE",       fmt_pct(info.get("returnOnEquity")))
-    r4[1].metric("ROA",       fmt_pct(info.get("returnOnAssets")))
-    r4[2].metric("52W High",  fmt_num(info.get("fiftyTwoWeekHigh")))
-    r4[3].metric("52W Low",   fmt_num(info.get("fiftyTwoWeekLow")))
+        if not has_data:
+            st.markdown(
+                f'<div style="padding:14px 18px; background:#fef3c7; '
+                f'border-left:3px solid #d97706; font-family:Inter,sans-serif; '
+                f'font-size:13px; color:#78350f; line-height:1.5;">'
+                f'Fundamentals unavailable for <strong>{chart_ticker}</strong>. '
+                f"This usually means yfinance was rate-limited (refresh in a minute) "
+                f"or the ticker doesn't have company-level data (e.g. some ETFs, "
+                f"foreign listings, or recently-delisted names)."
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            r1 = st.columns(4)
+            r1[0].metric("P/E (TTM)",      fmt_num(info.get("trailingPE")))
+            r1[1].metric("Forward P/E",    fmt_num(info.get("forwardPE")))
+            r1[2].metric("EPS (TTM)",      fmt_num(info.get("trailingEps")))
+            r1[3].metric("Earnings Yield", fmt_pct(earnings_yield))
 
-    desc = info.get("longBusinessSummary")
-    if desc:
-        with st.expander(f"About {info.get('longName', chart_ticker)}"):
-            st.write(desc)
+            r2 = st.columns(4)
+            r2[0].metric("Price / Book",   fmt_num(info.get("priceToBook")))
+            r2[1].metric("Beta",           fmt_num(info.get("beta")))
+            r2[2].metric("Market Cap",     fmt_big(info.get("marketCap")))
+            r2[3].metric("Dividend Yield", fmt_pct(info.get("dividendYield")))
+
+            r3 = st.columns(4)
+            r3[0].metric("Gross Margin",     fmt_pct(info.get("grossMargins")))
+            r3[1].metric("Operating Margin", fmt_pct(info.get("operatingMargins")))
+            r3[2].metric("EBITDA Margin",    fmt_pct(info.get("ebitdaMargins")))
+            r3[3].metric("Profit Margin",    fmt_pct(info.get("profitMargins")))
+
+            r4 = st.columns(4)
+            r4[0].metric("ROE",       fmt_pct(info.get("returnOnEquity")))
+            r4[1].metric("ROA",       fmt_pct(info.get("returnOnAssets")))
+            r4[2].metric("52W High",  fmt_num(info.get("fiftyTwoWeekHigh")))
+            r4[3].metric("52W Low",   fmt_num(info.get("fiftyTwoWeekLow")))
+
+            desc = info.get("longBusinessSummary")
+            if desc:
+                with st.expander(f"About {info.get('longName', chart_ticker)}"):
+                    st.write(desc)
 
     # ---- Macro News ----
     st.markdown('<div class="panel-title">Macro Headlines</div>', unsafe_allow_html=True)
@@ -1498,6 +1802,74 @@ with tab_industries:
 # CALENDAR TAB
 # =========================================================================
 with tab_calendar:
+    # ---- Macro Overview ----
+    st.markdown(
+        '<div class="kicker">Latest Releases via FRED</div>'
+        '<div class="panel-title">Macro Overview</div>',
+        unsafe_allow_html=True,
+    )
+
+    with st.spinner("Loading economic data..."):
+        econ = get_economic_dashboard_data()
+
+    if econ:
+        # Summary paragraph
+        macro_summary = generate_macro_summary(econ)
+        st.markdown(
+            f"""
+            <div style="border-left: 3px solid #2563eb; padding: 16px 22px;
+                        background: #f9fafb; margin: 4px 0 24px 0;">
+                <div style="font-family: 'Inter', sans-serif; font-size: 11px;
+                            color: #2563eb; letter-spacing: 0.12em;
+                            text-transform: uppercase; margin-bottom: 10px;
+                            font-weight: 600;">
+                    State of the Economy
+                </div>
+                <div style="font-family: 'Inter', sans-serif; font-size: 15px;
+                            color: #111827; line-height: 1.65;">
+                    {macro_summary}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # Indicator cards — 4 columns x 2 rows
+        indicators_order = ["gdp", "cpi", "unemp", "fed",
+                            "nfp", "claims", "yc"]
+        available = [k for k in indicators_order if k in econ]
+
+        # First row
+        if len(available) >= 4:
+            row1 = st.columns(4)
+            for i, key in enumerate(available[:4]):
+                d = econ[key]
+                with row1[i]:
+                    st.metric(
+                        label=f"{d['label']} · {d['date']}",
+                        value=d["value"],
+                        delta=d["delta"],
+                        delta_color="off",  # FRED data isn't directionally good/bad
+                    )
+
+        # Second row
+        if len(available) > 4:
+            row2 = st.columns(4)
+            for i, key in enumerate(available[4:8]):
+                d = econ[key]
+                with row2[i]:
+                    st.metric(
+                        label=f"{d['label']} · {d['date']}",
+                        value=d["value"],
+                        delta=d["delta"],
+                        delta_color="off",
+                    )
+    else:
+        st.info("Economic data is loading. This may take a moment on first load.")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ---- Event Calendar ----
     st.markdown(
         '<div class="kicker">Key Macro Events Ahead</div>'
         '<div class="panel-title">Economic Calendar</div>',
@@ -1521,7 +1893,7 @@ with tab_calendar:
     if not events:
         st.info(f"No upcoming events in the next {days_ahead} days.")
     else:
-        today_d = datetime.now().date()
+        today_d = now_mountain().date()
         rows = []
         for e in events:
             delta = (e["_date"] - today_d).days
@@ -1690,4 +2062,5 @@ with tab_comparison:
                                  linecolor="#e5e7eb", showline=True,
                                  tickformat=".1f")
             st.plotly_chart(cmp_fig, width="stretch")
+
 
