@@ -1292,8 +1292,8 @@ for t in list(st.session_state.watchlist):
 # =========================
 # TABS
 # =========================
-tab_markets, tab_comparison, tab_industries, tab_calendar = st.tabs(
-    ["Markets", "Comparison", "Industries", "Economic Data"]
+tab_markets, tab_comparison, tab_industries, tab_calendar, tab_screener = st.tabs(
+    ["Markets", "Comparison", "Industries", "Economic Data", "Screener"]
 )
 
 # =========================================================================
@@ -2064,3 +2064,420 @@ with tab_comparison:
             st.plotly_chart(cmp_fig, width="stretch")
 
 
+
+
+# =========================================================================
+# SCREENER TAB — Factor-based stock scoring
+# =========================================================================
+# Each metric is scored 0-10 based on simple breakpoints. Sub-scores within
+# each category are averaged, then weighted by user preferences for the
+# composite. The breakpoints are reasonable defaults but inevitably opinionated.
+# Treat the score as directional ("does this stock have decent metrics?"),
+# never as a buy/sell signal.
+
+def _score_pe(pe):
+    if pe is None or pe <= 0: return None
+    if pe < 10:  return 10  # very cheap (or value trap — context matters)
+    if pe < 15:  return 9
+    if pe < 20:  return 8
+    if pe < 25:  return 7
+    if pe < 30:  return 6
+    if pe < 40:  return 4
+    if pe < 60:  return 2
+    return 1
+
+def _score_pb(pb):
+    if pb is None or pb <= 0: return None
+    if pb < 1:   return 10
+    if pb < 1.5: return 9
+    if pb < 2.5: return 8
+    if pb < 4:   return 6
+    if pb < 6:   return 4
+    if pb < 10:  return 2
+    return 1
+
+def _score_roe(roe):
+    if roe is None: return None
+    pct = roe * 100  # yfinance returns 0.15 for 15%
+    if pct >= 30: return 10
+    if pct >= 20: return 9
+    if pct >= 15: return 8
+    if pct >= 10: return 7
+    if pct >= 5:  return 5
+    if pct >= 0:  return 3
+    return 1
+
+def _score_roa(roa):
+    if roa is None: return None
+    pct = roa * 100
+    if pct >= 15: return 10
+    if pct >= 10: return 9
+    if pct >= 7:  return 8
+    if pct >= 5:  return 7
+    if pct >= 2:  return 5
+    if pct >= 0:  return 3
+    return 1
+
+def _score_profit_margin(m):
+    if m is None: return None
+    pct = m * 100
+    if pct >= 30: return 10
+    if pct >= 20: return 9
+    if pct >= 15: return 8
+    if pct >= 10: return 7
+    if pct >= 5:  return 5
+    if pct >= 0:  return 3
+    return 1
+
+def _score_gross_margin(m):
+    if m is None: return None
+    pct = m * 100
+    if pct >= 70: return 10
+    if pct >= 55: return 9
+    if pct >= 40: return 8
+    if pct >= 30: return 7
+    if pct >= 20: return 5
+    if pct >= 10: return 3
+    return 1
+
+def _score_debt_equity(de):
+    if de is None: return None
+    # yfinance reports D/E as a percentage (e.g. 150 = 150%)
+    if de < 25:   return 10
+    if de < 50:   return 9
+    if de < 100:  return 7
+    if de < 150:  return 5
+    if de < 250:  return 3
+    if de < 400:  return 2
+    return 1
+
+def _score_current_ratio(cr):
+    if cr is None: return None
+    if cr >= 3:   return 10
+    if cr >= 2:   return 9
+    if cr >= 1.5: return 8
+    if cr >= 1.2: return 6
+    if cr >= 1:   return 5
+    if cr >= 0.8: return 3
+    return 1
+
+def _score_growth(g):
+    if g is None: return None
+    pct = g * 100
+    if pct >= 30: return 10
+    if pct >= 20: return 9
+    if pct >= 10: return 8
+    if pct >= 5:  return 7
+    if pct >= 0:  return 5
+    if pct >= -10: return 3
+    return 1
+
+def _score_beta(beta):
+    """For risk: lower beta = higher score (less risky). Beta near 1.0 = market."""
+    if beta is None: return None
+    if beta < 0.5:  return 10
+    if beta < 0.8:  return 9
+    if beta < 1.0:  return 8
+    if beta < 1.2:  return 7
+    if beta < 1.5:  return 5
+    if beta < 2.0:  return 3
+    return 1
+
+
+def compute_factor_scores(info):
+    """Return a dict of {category: (score, dict_of_metric_subscores)}."""
+    # Valuation
+    val_subs = {
+        "P/E (TTM)":  _score_pe(info.get("trailingPE")),
+        "P/B":        _score_pb(info.get("priceToBook")),
+    }
+
+    # Profitability
+    prof_subs = {
+        "ROE":         _score_roe(info.get("returnOnEquity")),
+        "ROA":         _score_roa(info.get("returnOnAssets")),
+        "Profit Marg": _score_profit_margin(info.get("profitMargins")),
+    }
+
+    # Financial Health
+    health_subs = {
+        "Debt/Equity":   _score_debt_equity(info.get("debtToEquity")),
+        "Current Ratio": _score_current_ratio(info.get("currentRatio")),
+    }
+
+    # Growth
+    growth_subs = {
+        "Revenue Growth": _score_growth(info.get("revenueGrowth")),
+        "Earnings Growth": _score_growth(info.get("earningsGrowth")),
+    }
+
+    # Quality
+    quality_subs = {
+        "Gross Margin": _score_gross_margin(info.get("grossMargins")),
+        "Op. Margin":   _score_profit_margin(info.get("operatingMargins")),
+    }
+
+    # Risk (lower beta = higher score)
+    risk_subs = {
+        "Beta": _score_beta(info.get("beta")),
+    }
+
+    def _avg(d):
+        vals = [v for v in d.values() if v is not None]
+        if not vals:
+            return None
+        return sum(vals) / len(vals)
+
+    return {
+        "Valuation":       (_avg(val_subs), val_subs),
+        "Profitability":   (_avg(prof_subs), prof_subs),
+        "Financial Health":(_avg(health_subs), health_subs),
+        "Growth":          (_avg(growth_subs), growth_subs),
+        "Quality":         (_avg(quality_subs), quality_subs),
+        "Risk":            (_avg(risk_subs), risk_subs),
+    }
+
+
+def score_color(score):
+    """Return a color for the score: red (low) -> amber (mid) -> green (high)."""
+    if score is None:
+        return "#9ca3af"
+    if score >= 8.5: return "#047857"  # deep green
+    if score >= 7:   return "#10b981"  # green
+    if score >= 5.5: return "#84cc16"  # lime
+    if score >= 4:   return "#eab308"  # amber
+    if score >= 2.5: return "#f97316"  # orange
+    return "#dc2626"  # red
+
+
+with tab_screener:
+    st.markdown(
+        '<div class="kicker">Factor-Based Quality Score</div>'
+        '<div class="panel-title">Stock Screener</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Honest disclaimer
+    st.markdown(
+        '<div style="margin-bottom:18px; padding:12px 16px; background:#fef3c7; '
+        'border-left:3px solid #d97706; font-family:Inter,sans-serif; '
+        'font-size:12px; color:#78350f; line-height:1.5;">'
+        '<strong style="color:#92400e;">How to read this.</strong> Each factor is '
+        'scored 0-10 against simple thresholds. The composite is a weighted average '
+        'of the factor scores. A high score means the metrics look reasonable — it '
+        'is not a buy signal. Quantitative scoring misses moats, management, '
+        'accounting quality, and end-market shifts. Use it to narrow candidates, '
+        'not to make decisions.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Ticker input
+    screener_ticker = st.text_input(
+        "Ticker to screen",
+        value="AAPL",
+        placeholder="e.g. NVDA, JPM, KO",
+        key="screener_ticker_input",
+    ).strip().upper() or "AAPL"
+
+    # Weight controls in an expander
+    with st.expander("Adjust factor weights"):
+        st.markdown(
+            '<div style="font-family:Inter,sans-serif; font-size:12px; color:#6b7280; '
+            'margin-bottom:8px;">Set how much each factor matters. Weights are '
+            'normalized so they always sum to 100%.</div>',
+            unsafe_allow_html=True,
+        )
+        w_left, w_right = st.columns(2)
+        with w_left:
+            w_val = st.slider("Valuation weight",        0, 10, 3, key="w_val")
+            w_prof = st.slider("Profitability weight",   0, 10, 3, key="w_prof")
+            w_health = st.slider("Financial Health weight", 0, 10, 2, key="w_health")
+        with w_right:
+            w_growth = st.slider("Growth weight",        0, 10, 2, key="w_growth")
+            w_quality = st.slider("Quality weight",      0, 10, 2, key="w_quality")
+            w_risk = st.slider("Risk (low-beta) weight", 0, 10, 1, key="w_risk")
+
+    weights_raw = {
+        "Valuation": w_val,
+        "Profitability": w_prof,
+        "Financial Health": w_health,
+        "Growth": w_growth,
+        "Quality": w_quality,
+        "Risk": w_risk,
+    }
+    total_w = sum(weights_raw.values()) or 1
+    weights = {k: v / total_w for k, v in weights_raw.items()}
+
+    # Fetch data
+    if screener_ticker.startswith("^"):
+        st.warning(f"{screener_ticker} is an index. Pick a stock ticker (e.g. AAPL, MSFT, JPM).")
+    else:
+        with st.spinner(f"Fetching {screener_ticker} fundamentals..."):
+            sc_info = get_info(screener_ticker)
+
+        meaningful_keys = ["trailingPE", "marketCap", "totalRevenue", "trailingEps"]
+        if not any(sc_info.get(k) is not None for k in meaningful_keys):
+            st.warning(
+                f"Could not fetch fundamentals for {screener_ticker}. The ticker "
+                f"may be invalid, an ETF without company-level data, or yfinance "
+                f"may be rate-limited. Try again in a moment."
+            )
+        else:
+            scores = compute_factor_scores(sc_info)
+
+            # Composite — weighted average of available factor scores
+            weighted_sum, weight_used = 0.0, 0.0
+            for cat, (score, _) in scores.items():
+                if score is not None:
+                    weighted_sum += score * weights[cat]
+                    weight_used += weights[cat]
+            composite = (weighted_sum / weight_used) if weight_used > 0 else None
+
+            # ---- Composite display ----
+            comp_color = score_color(composite)
+            comp_text = f"{composite:.1f}" if composite is not None else "—"
+
+            # Verdict
+            if composite is None:
+                verdict = "Insufficient data to score."
+            elif composite >= 8.5:
+                verdict = "Strong across the board on most factors."
+            elif composite >= 7:
+                verdict = "Solid — most factors are healthy."
+            elif composite >= 5.5:
+                verdict = "Mixed — some strengths, some weaknesses."
+            elif composite >= 4:
+                verdict = "Below average on most factors."
+            else:
+                verdict = "Multiple red flags. Investigate carefully."
+
+            display_name = sc_info.get("longName", screener_ticker)
+
+            st.markdown(
+                f'<div style="display:flex; align-items:center; gap:24px; '
+                f'padding:24px; background:#f9fafb; border:1px solid #e5e7eb; '
+                f'margin:20px 0; border-radius:2px;">'
+                f'<div style="background:{comp_color}; color:white; '
+                f'width:120px; height:120px; border-radius:50%; '
+                f'display:flex; flex-direction:column; align-items:center; '
+                f'justify-content:center; flex-shrink:0;">'
+                f'<div style="font-family:\'JetBrains Mono\',monospace; '
+                f'font-size:36px; font-weight:700; line-height:1;">{comp_text}</div>'
+                f'<div style="font-family:Inter,sans-serif; font-size:10px; '
+                f'opacity:0.85; margin-top:4px; letter-spacing:0.05em;">OUT OF 10</div>'
+                f'</div>'
+                f'<div style="flex:1;">'
+                f'<div style="font-family:Inter,sans-serif; font-size:11px; '
+                f'color:#6b7280; text-transform:uppercase; letter-spacing:0.1em; '
+                f'margin-bottom:4px;">Composite Score</div>'
+                f'<div style="font-family:Inter,sans-serif; font-size:22px; '
+                f'font-weight:600; color:#111827; margin-bottom:8px;">'
+                f'{display_name} ({screener_ticker})</div>'
+                f'<div style="font-family:Inter,sans-serif; font-size:14px; '
+                f'color:#374151; line-height:1.5;">{verdict}</div>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            # ---- Factor breakdown ----
+            st.markdown(
+                '<div class="kicker">Factor Breakdown</div>'
+                '<div class="panel-title">Sub-Scores</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Bar chart of factor scores
+            factor_labels = list(scores.keys())
+            factor_values = [scores[k][0] if scores[k][0] is not None else 0 for k in factor_labels]
+            factor_colors = [score_color(scores[k][0]) for k in factor_labels]
+
+            bar_fig = go.Figure(go.Bar(
+                x=factor_values,
+                y=factor_labels,
+                orientation="h",
+                marker=dict(color=factor_colors),
+                text=[f"{v:.1f}" if scores[k][0] is not None else "N/A"
+                      for k, v in zip(factor_labels, factor_values)],
+                textposition="outside",
+                textfont=dict(family="JetBrains Mono", size=12, color="#111827"),
+                hovertemplate="<b>%{y}</b><br>Score: %{x:.1f}/10<extra></extra>",
+            ))
+            bar_fig.update_layout(
+                template="simple_white",
+                paper_bgcolor="#ffffff",
+                plot_bgcolor="#ffffff",
+                height=280,
+                margin=dict(l=10, r=40, t=10, b=10),
+                showlegend=False,
+                font=dict(family="Inter, sans-serif", color="#111827", size=12),
+                xaxis=dict(range=[0, 11], gridcolor="#f3f4f6", showline=True,
+                           linecolor="#e5e7eb", tickvals=[0, 2, 4, 6, 8, 10]),
+                yaxis=dict(showline=False, autorange="reversed"),
+            )
+            st.plotly_chart(bar_fig, width="stretch")
+
+            # Detailed breakdown table
+            st.markdown(
+                '<div class="kicker">Underlying Metrics</div>'
+                '<div class="panel-title">Detail</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Pull raw values for display
+            raw_lookup = {
+                "P/E (TTM)":      ("trailingPE", "num", 1),
+                "P/B":            ("priceToBook", "num", 1),
+                "ROE":            ("returnOnEquity", "pct", 1),
+                "ROA":            ("returnOnAssets", "pct", 1),
+                "Profit Marg":    ("profitMargins", "pct", 1),
+                "Debt/Equity":    ("debtToEquity", "num", 1),
+                "Current Ratio":  ("currentRatio", "num", 1),
+                "Revenue Growth": ("revenueGrowth", "pct", 1),
+                "Earnings Growth": ("earningsGrowth", "pct", 1),
+                "Gross Margin":   ("grossMargins", "pct", 1),
+                "Op. Margin":     ("operatingMargins", "pct", 1),
+                "Beta":           ("beta", "num", 1),
+            }
+
+            detail_rows = []
+            for cat, (avg, subs) in scores.items():
+                for metric, sub_score in subs.items():
+                    yfin_key, kind, _ = raw_lookup.get(metric, (None, "num", 1))
+                    raw = sc_info.get(yfin_key) if yfin_key else None
+                    if raw is None:
+                        raw_str = "N/A"
+                    elif kind == "pct":
+                        raw_str = f"{raw * 100:.2f}%"
+                    else:
+                        raw_str = f"{raw:.2f}"
+                    detail_rows.append({
+                        "Category": cat,
+                        "Metric": metric,
+                        "Value": raw_str,
+                        "Score": f"{sub_score:.1f}" if sub_score is not None else "N/A",
+                        "Weight": f"{weights[cat]*100:.0f}%",
+                    })
+
+            detail_df = pd.DataFrame(detail_rows)
+
+            def _score_color_css(val):
+                try:
+                    s = float(val)
+                except (ValueError, TypeError):
+                    return ""
+                color = score_color(s)
+                return f"color: {color}; font-weight: 600;"
+
+            detail_styled = (
+                detail_df.style
+                .set_properties(**{
+                    "background-color": "#ffffff",
+                    "color": "#111827",
+                    "font-family": "JetBrains Mono, monospace",
+                    "font-size": "13px",
+                })
+                .map(_score_color_css, subset=["Score"])
+            )
+            st.dataframe(detail_styled, width="stretch", hide_index=True)
