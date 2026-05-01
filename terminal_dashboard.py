@@ -1292,8 +1292,8 @@ for t in list(st.session_state.watchlist):
 # =========================
 # TABS
 # =========================
-tab_markets, tab_comparison, tab_industries, tab_calendar, tab_screener = st.tabs(
-    ["Markets", "Comparison", "Industries", "Economic Data", "Screener"]
+tab_markets, tab_calendar, tab_screener, tab_industries, tab_comparison = st.tabs(
+    ["Markets", "Economic Data", "Screener", "Industries", "Comparison"]
 )
 
 # =========================================================================
@@ -2184,6 +2184,166 @@ def _score_beta(beta):
     return 1
 
 
+# ---- Technical indicator helpers ----
+def _compute_rsi(closes, periods=14):
+    """Standard 14-period RSI from a Close price series. Returns latest value."""
+    if len(closes) < periods + 1:
+        return None
+    delta = closes.diff()
+    gains = delta.where(delta > 0, 0.0)
+    losses = -delta.where(delta < 0, 0.0)
+    avg_gain = gains.rolling(periods).mean()
+    avg_loss = losses.rolling(periods).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    val = rsi.iloc[-1]
+    if pd.isna(val):
+        return None
+    return float(val)
+
+
+def compute_technical_indicators(ticker):
+    """Pull 1y of daily history and compute key technical metrics.
+
+    Returns a dict with raw values for each indicator (or None if unavailable).
+    """
+    hist = get_chart_history(ticker, "1Y")
+    if hist.empty or len(hist) < 50:
+        return {}
+
+    closes = hist["Close"]
+    last = float(closes.iloc[-1])
+
+    # Moving averages
+    ma50 = float(closes.rolling(50).mean().iloc[-1]) if len(closes) >= 50 else None
+    ma200 = float(closes.rolling(200).mean().iloc[-1]) if len(closes) >= 200 else None
+
+    # 52-week range
+    high_52w = float(closes.max())
+    low_52w = float(closes.min())
+
+    # Distance from extremes (as % of price)
+    pct_from_high = (last - high_52w) / high_52w * 100  # negative or zero
+    pct_above_low = (last - low_52w) / low_52w * 100    # positive
+
+    # Trend regime: above/below MAs as %
+    pct_vs_ma50 = ((last - ma50) / ma50 * 100) if ma50 else None
+    pct_vs_ma200 = ((last - ma200) / ma200 * 100) if ma200 else None
+
+    # Cross signal
+    if ma50 is not None and ma200 is not None:
+        cross_signal = "Golden" if ma50 > ma200 else "Death"
+    else:
+        cross_signal = None
+
+    # RSI
+    rsi = _compute_rsi(closes, 14)
+
+    return {
+        "last": last,
+        "ma50": ma50,
+        "ma200": ma200,
+        "pct_vs_ma50": pct_vs_ma50,
+        "pct_vs_ma200": pct_vs_ma200,
+        "cross": cross_signal,
+        "rsi": rsi,
+        "pct_from_high": pct_from_high,
+        "pct_above_low": pct_above_low,
+    }
+
+
+# ---- Technical scoring functions ----
+def _score_pct_vs_ma(pct):
+    """Price vs moving average (50- or 200-day). Above = bullish."""
+    if pct is None:
+        return None
+    if pct >= 15:  return 10  # well above trend
+    if pct >= 8:   return 9
+    if pct >= 3:   return 8
+    if pct >= 0:   return 7   # just above
+    if pct >= -3:  return 5   # just below
+    if pct >= -8:  return 3
+    if pct >= -15: return 2
+    return 1
+
+
+def _score_cross(signal):
+    """Golden cross = bullish (MA50 > MA200), Death cross = bearish."""
+    if signal == "Golden":
+        return 9
+    if signal == "Death":
+        return 2
+    return None
+
+
+def _score_rsi(rsi):
+    """Goldilocks zone = 50-70 (bullish momentum without overbought).
+    Penalize both extremes."""
+    if rsi is None:
+        return None
+    if 50 <= rsi <= 65:  return 10  # ideal bullish
+    if 65 < rsi <= 70:   return 8   # strong but watch
+    if 45 <= rsi < 50:   return 7   # neutral-leaning bullish
+    if 70 < rsi <= 80:   return 5   # overbought territory
+    if 35 <= rsi < 45:   return 5   # neutral-leaning bearish
+    if 30 <= rsi < 35:   return 4
+    if rsi > 80:         return 2   # extreme overbought
+    return 2  # rsi < 30, oversold (could be opportunity but risky)
+
+
+def _score_pct_from_high(pct):
+    """Distance from 52W high: closer = stronger momentum."""
+    if pct is None:
+        return None
+    # pct is negative or zero (e.g. -8.5 means 8.5% below 52W high)
+    if pct >= -2:  return 10  # at or near high
+    if pct >= -5:  return 9
+    if pct >= -10: return 7
+    if pct >= -20: return 5
+    if pct >= -35: return 3
+    return 1
+
+
+def _score_pct_above_low(pct):
+    """Distance from 52W low: higher = stronger recovery from drawdown."""
+    if pct is None:
+        return None
+    if pct >= 50: return 10
+    if pct >= 30: return 9
+    if pct >= 20: return 8
+    if pct >= 10: return 6
+    if pct >= 5:  return 4
+    return 2
+
+
+def compute_technical_score(tech):
+    """Average sub-scores into a single Technicals score (0-10)."""
+    if not tech:
+        return None, {}
+    subs = {
+        "vs 50-day MA":   _score_pct_vs_ma(tech.get("pct_vs_ma50")),
+        "vs 200-day MA":  _score_pct_vs_ma(tech.get("pct_vs_ma200")),
+        "MA Cross":       _score_cross(tech.get("cross")),
+        "RSI (14)":       _score_rsi(tech.get("rsi")),
+        "vs 52W High":    _score_pct_from_high(tech.get("pct_from_high")),
+        "vs 52W Low":     _score_pct_above_low(tech.get("pct_above_low")),
+    }
+    vals = [v for v in subs.values() if v is not None]
+    avg = (sum(vals) / len(vals)) if vals else None
+    return avg, subs
+
+
+def technical_verdict(score):
+    """One-line verdict for the technical score."""
+    if score is None:
+        return "Insufficient price history."
+    if score >= 8.5: return "Strongly bullish — trend, momentum, and positioning all align."
+    if score >= 7:   return "Bullish — most technicals are constructive."
+    if score >= 5.5: return "Mixed — some bullish signals, some warnings."
+    if score >= 4:   return "Bearish — multiple technical headwinds."
+    return "Strongly bearish — broad technical weakness."
+
+
 def compute_factor_scores(info):
     """Return a dict of {category: (score, dict_of_metric_subscores)}."""
     # Valuation
@@ -2297,6 +2457,7 @@ with tab_screener:
             w_growth = st.slider("Growth weight",        0, 10, 2, key="w_growth")
             w_quality = st.slider("Quality weight",      0, 10, 2, key="w_quality")
             w_risk = st.slider("Risk (low-beta) weight", 0, 10, 1, key="w_risk")
+            w_tech = st.slider("Technicals weight",      0, 10, 2, key="w_tech")
 
     weights_raw = {
         "Valuation": w_val,
@@ -2305,6 +2466,7 @@ with tab_screener:
         "Growth": w_growth,
         "Quality": w_quality,
         "Risk": w_risk,
+        "Technicals": w_tech,
     }
     total_w = sum(weights_raw.values()) or 1
     weights = {k: v / total_w for k, v in weights_raw.items()}
@@ -2325,6 +2487,11 @@ with tab_screener:
             )
         else:
             scores = compute_factor_scores(sc_info)
+
+            # Compute technical indicators and add as another factor
+            tech_data = compute_technical_indicators(screener_ticker)
+            tech_score, tech_subs = compute_technical_score(tech_data)
+            scores["Technicals"] = (tech_score, tech_subs)
 
             # Composite — weighted average of available factor scores
             weighted_sum, weight_used = 0.0, 0.0
@@ -2418,6 +2585,113 @@ with tab_screener:
             )
             st.plotly_chart(bar_fig, width="stretch")
 
+            # ---- Technical Snapshot ----
+            if tech_data:
+                tech_color = score_color(tech_score)
+                t_score_str = f"{tech_score:.1f}" if tech_score is not None else "—"
+                tech_verdict_text = technical_verdict(tech_score)
+
+                st.markdown(
+                    f'<div style="display:flex; align-items:center; gap:20px; '
+                    f'padding:18px 22px; background:#f9fafb; border:1px solid #e5e7eb; '
+                    f'margin:24px 0 16px 0; border-radius:2px;">'
+                    f'<div style="background:{tech_color}; color:white; '
+                    f'width:80px; height:80px; border-radius:50%; '
+                    f'display:flex; flex-direction:column; align-items:center; '
+                    f'justify-content:center; flex-shrink:0;">'
+                    f'<div style="font-family:\'JetBrains Mono\',monospace; '
+                    f'font-size:24px; font-weight:700; line-height:1;">{t_score_str}</div>'
+                    f'<div style="font-family:Inter,sans-serif; font-size:9px; '
+                    f'opacity:0.85; margin-top:2px; letter-spacing:0.05em;">/ 10</div>'
+                    f'</div>'
+                    f'<div style="flex:1;">'
+                    f'<div style="font-family:Inter,sans-serif; font-size:11px; '
+                    f'color:#6b7280; text-transform:uppercase; letter-spacing:0.1em; '
+                    f'margin-bottom:4px;">Technical Snapshot</div>'
+                    f'<div style="font-family:Inter,sans-serif; font-size:14px; '
+                    f'color:#111827; line-height:1.5;">{tech_verdict_text}</div>'
+                    f'</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+                # Raw technical metric cards
+                last = tech_data.get("last")
+                ma50 = tech_data.get("ma50")
+                ma200 = tech_data.get("ma200")
+                rsi_val = tech_data.get("rsi")
+                cross = tech_data.get("cross")
+
+                # Row 1: trend
+                t1 = st.columns(4)
+                if last is not None and ma50 is not None:
+                    pct_50 = tech_data.get("pct_vs_ma50") or 0
+                    delta_str = f"{pct_50:+.2f}% vs MA"
+                    t1[0].metric("Price vs 50-day MA",
+                                 f"${last:,.2f}", delta_str,
+                                 delta_color="normal" if pct_50 >= 0 else "inverse")
+                else:
+                    t1[0].metric("Price vs 50-day MA", "—")
+
+                if ma50 is not None:
+                    t1[1].metric("50-day MA", f"${ma50:,.2f}")
+                else:
+                    t1[1].metric("50-day MA", "—")
+
+                if ma200 is not None:
+                    t1[2].metric("200-day MA", f"${ma200:,.2f}")
+                else:
+                    t1[2].metric("200-day MA", "—")
+
+                if cross:
+                    cross_color = "normal" if cross == "Golden" else "inverse"
+                    t1[3].metric("MA Cross Signal", f"{cross} Cross",
+                                 delta="Bullish" if cross == "Golden" else "Bearish",
+                                 delta_color=cross_color)
+                else:
+                    t1[3].metric("MA Cross Signal", "—")
+
+                # Row 2: momentum / range
+                t2 = st.columns(4)
+                if rsi_val is not None:
+                    if rsi_val >= 70:
+                        rsi_label = "Overbought"
+                    elif rsi_val <= 30:
+                        rsi_label = "Oversold"
+                    elif rsi_val >= 50:
+                        rsi_label = "Bullish"
+                    else:
+                        rsi_label = "Bearish"
+                    rsi_dir = "normal" if 50 <= rsi_val < 70 else "inverse"
+                    t2[0].metric("RSI (14)", f"{rsi_val:.1f}",
+                                 delta=rsi_label, delta_color=rsi_dir)
+                else:
+                    t2[0].metric("RSI (14)", "—")
+
+                pct_high = tech_data.get("pct_from_high")
+                if pct_high is not None:
+                    t2[1].metric("From 52W High", f"{pct_high:+.2f}%",
+                                 delta="Near high" if pct_high >= -5 else "Below high",
+                                 delta_color="off")
+                else:
+                    t2[1].metric("From 52W High", "—")
+
+                pct_low = tech_data.get("pct_above_low")
+                if pct_low is not None:
+                    t2[2].metric("Above 52W Low", f"+{pct_low:.2f}%",
+                                 delta="Recovered" if pct_low >= 20 else "Near low",
+                                 delta_color="off")
+                else:
+                    t2[2].metric("Above 52W Low", "—")
+
+                pct_200 = tech_data.get("pct_vs_ma200")
+                if pct_200 is not None:
+                    t2[3].metric("Price vs 200-day MA", f"{pct_200:+.2f}%",
+                                 delta="Above" if pct_200 >= 0 else "Below",
+                                 delta_color="normal" if pct_200 >= 0 else "inverse")
+                else:
+                    t2[3].metric("Price vs 200-day MA", "—")
+
             # Detailed breakdown table
             st.markdown(
                 '<div class="kicker">Underlying Metrics</div>'
@@ -2425,33 +2699,55 @@ with tab_screener:
                 unsafe_allow_html=True,
             )
 
-            # Pull raw values for display
+            # Pull raw values for display. Each entry: (source, key, kind)
+            # source: "info" (yfinance .info) or "tech" (technical indicators)
             raw_lookup = {
-                "P/E (TTM)":      ("trailingPE", "num", 1),
-                "P/B":            ("priceToBook", "num", 1),
-                "ROE":            ("returnOnEquity", "pct", 1),
-                "ROA":            ("returnOnAssets", "pct", 1),
-                "Profit Marg":    ("profitMargins", "pct", 1),
-                "Debt/Equity":    ("debtToEquity", "num", 1),
-                "Current Ratio":  ("currentRatio", "num", 1),
-                "Revenue Growth": ("revenueGrowth", "pct", 1),
-                "Earnings Growth": ("earningsGrowth", "pct", 1),
-                "Gross Margin":   ("grossMargins", "pct", 1),
-                "Op. Margin":     ("operatingMargins", "pct", 1),
-                "Beta":           ("beta", "num", 1),
+                # Fundamentals (from yfinance info dict)
+                "P/E (TTM)":       ("info", "trailingPE", "num"),
+                "P/B":             ("info", "priceToBook", "num"),
+                "ROE":             ("info", "returnOnEquity", "pct"),
+                "ROA":             ("info", "returnOnAssets", "pct"),
+                "Profit Marg":     ("info", "profitMargins", "pct"),
+                "Debt/Equity":     ("info", "debtToEquity", "num"),
+                "Current Ratio":   ("info", "currentRatio", "num"),
+                "Revenue Growth":  ("info", "revenueGrowth", "pct"),
+                "Earnings Growth": ("info", "earningsGrowth", "pct"),
+                "Gross Margin":    ("info", "grossMargins", "pct"),
+                "Op. Margin":      ("info", "operatingMargins", "pct"),
+                "Beta":            ("info", "beta", "num"),
+                # Technicals (from tech_data dict)
+                "vs 50-day MA":    ("tech", "pct_vs_ma50", "pct_signed"),
+                "vs 200-day MA":   ("tech", "pct_vs_ma200", "pct_signed"),
+                "MA Cross":        ("tech", "cross", "raw"),
+                "RSI (14)":        ("tech", "rsi", "num"),
+                "vs 52W High":     ("tech", "pct_from_high", "pct_signed"),
+                "vs 52W Low":      ("tech", "pct_above_low", "pct_signed"),
             }
 
             detail_rows = []
             for cat, (avg, subs) in scores.items():
                 for metric, sub_score in subs.items():
-                    yfin_key, kind, _ = raw_lookup.get(metric, (None, "num", 1))
-                    raw = sc_info.get(yfin_key) if yfin_key else None
+                    lookup = raw_lookup.get(metric)
+                    raw = None
+                    if lookup:
+                        source, key, _ = lookup
+                        if source == "info":
+                            raw = sc_info.get(key)
+                        elif source == "tech" and tech_data:
+                            raw = tech_data.get(key)
+
+                    kind = lookup[2] if lookup else "num"
                     if raw is None:
                         raw_str = "N/A"
                     elif kind == "pct":
                         raw_str = f"{raw * 100:.2f}%"
+                    elif kind == "pct_signed":
+                        raw_str = f"{raw:+.2f}%"
+                    elif kind == "raw":
+                        raw_str = str(raw)
                     else:
                         raw_str = f"{raw:.2f}"
+
                     detail_rows.append({
                         "Category": cat,
                         "Metric": metric,
